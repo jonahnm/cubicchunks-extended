@@ -1,0 +1,27 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "dev.cubicchunks.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ServerLevelMixin",
+    "YClampedGradientMixin",
+    "AbsoluteVerticalAnchorMixin",
+    "WorldGenerationContextMixin",
+    "NoiseBasedAquiferMixin",
+    "FluidStatusAccessor",
+    "StateRuleMixin",
+    "SurfaceRulesContextAccessor",
+    "ClimateSamplerMixin",
+    "CountPlacementMixin",
+    "RepeatingPlacementMixin"
+  ],
+  "client": [
+    "ClientLevelMixin",
+    "client.ClientPacketListenerMixin"
+  ],
+  "server": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

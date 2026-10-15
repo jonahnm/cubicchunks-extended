@@ -1,0 +1,45 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.148'
+}
+
+group = 'dev.cubicchunks'
+version = '0.1.0'
+
+base {
+    archivesName = 'cubicchunks'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+neoForge {
+    version = '21.1.259'
+
+    runs {
+        client {
+            client()
+            gameDirectory = file('run-client')
+        }
+        server {
+            server()
+        }
+    }
+
+    mods {
+        cubicchunks {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

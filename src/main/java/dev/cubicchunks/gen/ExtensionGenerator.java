@@ -1,0 +1,343 @@
+package dev.cubicchunks.gen;
+
+import java.util.Arrays;
+
+import dev.cubicchunks.CubicConfig;
+import dev.cubicchunks.worldgen.WorldGenState;
+import net.minecraft.core.Holder;
+import net.minecraft.core.QuartPos;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.BiomeSource;
+import net.minecraft.world.level.biome.Biomes;
+import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.dimension.DimensionType;
+import net.minecraft.world.level.levelgen.Aquifer;
+import net.minecraft.world.level.levelgen.DensityFunction;
+import net.minecraft.world.level.levelgen.DensityFunctions;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
+import net.minecraft.world.level.levelgen.NoiseChunk;
+import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.NoiseSettings;
+import net.minecraft.world.level.levelgen.RandomState;
+import net.minecraft.world.level.levelgen.blending.Blender;
+import net.minecraft.world.level.levelgen.synth.NormalNoise;
+
+/**
+ * Generates one 16x16x16 extension cube below the vanilla band of a dimension.
+ *
+ * <p>The content is pure vanilla machinery: the world's own {@link RandomState} (identical noise
+ * instances to vanilla worldgen) evaluated through a per-cube {@link NoiseChunk} with a
+ * cube-sized {@link NoiseSettings} window, over the same absolute coordinates a full-height
+ * vanilla generation would use. Cave shaping comes from vanilla's own density functions — the
+ * {@code YClampedGradientMixin} re-baselines the band-anchored terrain gradients at depth so the
+ * vanilla {@code underground} cave branch (cheese caverns, entrances, spaghetti, pillars) stays
+ * active below the band, exactly as it does in the reference C2Chunks implementation. No custom
+ * noise is added.
+ *
+ * <p>Surface-rule equivalents for depth (deepslate gradient, optional bedrock floor at the world
+ * bottom) are applied by {@link #applyStrataRule}; the band's own bedrock is relocated by the
+ * {@code StateRuleMixin}.
+ *
+ * <p>For non-noise generators (flat worlds, exotic modded engines) a simple strata fallback is
+ * used.
+ */
+public final class ExtensionGenerator {
+
+    /** No-op beardifier (no structures exist in extension cubes). */
+    private enum NoBeardifier implements DensityFunctions.BeardifierOrMarker {
+        INSTANCE;
+
+        @Override
+        public double compute(DensityFunction.FunctionContext context) {
+            return 0.0;
+        }
+
+        @Override
+        public void fillArray(double[] array, DensityFunction.ContextProvider provider) {
+            Arrays.fill(array, 0.0);
+        }
+
+        @Override
+        public double minValue() {
+            return 0.0;
+        }
+
+        @Override
+        public double maxValue() {
+            return 0.0;
+        }
+    }
+
+    /** Exposes {@link NoiseChunk#getInterpolatedState()} (protected) for our cube fill loop. */
+    private static final class CubeNoiseChunk extends NoiseChunk {
+        CubeNoiseChunk(int cellCountXZ, RandomState randomState, int blockX, int blockZ,
+                NoiseSettings noiseSettings, NoiseGeneratorSettings genSettings, Aquifer.FluidPicker fluidPicker) {
+            super(cellCountXZ, randomState, blockX, blockZ, noiseSettings,
+                    NoBeardifier.INSTANCE, genSettings, fluidPicker, Blender.empty());
+        }
+
+        BlockState nextBlockState() {
+            return getInterpolatedState();
+        }
+    }
+
+    private final ServerLevel level;
+    private final CubicConfig.CubicLevelState state;
+    private final ChunkGenerator generator;
+
+    /** Y range where vanilla worldgen produced terrain: [bandMinY, bandMaxY). */
+    private final int bandMinY;
+    private final int bandMaxY;
+    private final int stratumHeight;
+
+    /** Non-null only when the dimension's generator is noise-based. */
+    private final NoiseGeneratorSettings settings;
+    private final RandomState randomState;
+    private final Aquifer.FluidPicker fluidPicker;
+    private final boolean deepslateStrata;
+
+    public ExtensionGenerator(ServerLevel level, CubicConfig.CubicLevelState state) {
+        this.level = level;
+        this.state = state;
+        this.generator = level.getChunkSource().getGenerator();
+
+        if (generator instanceof NoiseBasedChunkGenerator nbg) {
+            this.settings = nbg.generatorSettings().value();
+            NoiseSettings ns = this.settings.noiseSettings();
+            this.bandMinY = ns.minY();
+            this.bandMaxY = ns.minY() + ns.height();
+            this.stratumHeight = ns.height();
+            this.randomState = level.getChunkSource().randomState();
+            this.fluidPicker = createFluidPicker(this.settings);
+            this.deepslateStrata = this.settings.defaultBlock() == Blocks.STONE.defaultBlockState();
+        } else {
+            this.settings = null;
+            DimensionType type = level.dimensionType();
+            this.bandMinY = type.minY();
+            this.bandMaxY = type.minY() + type.height();
+            this.stratumHeight = Math.max(16, type.height());
+            this.randomState = null;
+            this.fluidPicker = null;
+            this.deepslateStrata = !type.ultraWarm();
+        }
+    }
+
+    public int bandMinY() {
+        return bandMinY;
+    }
+
+    public int bandMaxY() {
+        return bandMaxY;
+    }
+
+    public int bandMinSection() {
+        return bandMinY >> 4;
+    }
+
+    public int stratumHeight() {
+        return stratumHeight;
+    }
+
+    /**
+     * Generates the extension cube (16x16x16) at {@code sectionY} of the given column and returns
+     * it; the caller installs it into the chunk.
+     */
+    public LevelChunkSection generateCube(LevelChunk chunk, int sectionY) {
+        int cubeMinY = sectionY << 4;
+        ChunkPos chunkPos = chunk.getPos();
+
+        Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
+        PalettedContainer<BlockState> states = new PalettedContainer<>(
+                Block.BLOCK_STATE_REGISTRY,
+                Blocks.AIR.defaultBlockState(),
+                PalettedContainer.Strategy.SECTION_STATES);
+        PalettedContainer<Holder<Biome>> biomes = new PalettedContainer<>(
+                biomeRegistry.asHolderIdMap(),
+                biomeRegistry.getHolderOrThrow(Biomes.PLAINS),
+                PalettedContainer.Strategy.SECTION_BIOMES);
+
+        if (settings != null) {
+            fillFromVanillaNoise(chunk, cubeMinY, states);
+        } else {
+            fillFallback(cubeMinY, states);
+        }
+        fillBiomes(cubeMinY, chunkPos, biomes);
+
+        return new LevelChunkSection(states, biomes);
+    }
+
+    private void fillFromVanillaNoise(LevelChunk chunk, int cubeMinY, PalettedContainer<BlockState> states) {
+        NoiseSettings base = settings.noiseSettings();
+        NoiseSettings cubeSettings =
+                new NoiseSettings(cubeMinY, 16, base.noiseSizeHorizontal(), base.noiseSizeVertical());
+        NoiseGeneratorSettings cubeGenSettings = new NoiseGeneratorSettings(
+                cubeSettings,
+                settings.defaultBlock(),
+                settings.defaultFluid(),
+                settings.noiseRouter(),
+                settings.surfaceRule(),
+                settings.spawnTarget(),
+                settings.seaLevel(),
+                settings.disableMobGeneration(),
+                settings.isAquifersEnabled(),
+                settings.oreVeinsEnabled(),
+                settings.useLegacyRandomSource());
+
+        ChunkPos chunkPos = chunk.getPos();
+        CubeNoiseChunk noiseChunk = new CubeNoiseChunk(
+                16 / cubeSettings.getCellWidth(),
+                randomState,
+                chunkPos.getMinBlockX(),
+                chunkPos.getMinBlockZ(),
+                cubeSettings,
+                cubeGenSettings,
+                fluidPicker);
+
+        // Replicates NoiseBasedChunkGenerator#doFill, restricted to this cube's 16-block window.
+        // Identical to a full-height vanilla fill because interpolation cells are globally aligned.
+        int cellWidth = cubeSettings.getCellWidth();
+        int cellHeight = cubeSettings.getCellHeight();
+        int cellsXZ = 16 / cellWidth;
+        int cellsY = Math.floorDiv(16, cellHeight);
+        int firstCellY = Math.floorDiv(cubeMinY, cellHeight);
+
+        noiseChunk.initializeForFirstCellX();
+        for (int cx = 0; cx < cellsXZ; cx++) {
+            noiseChunk.advanceCellX(cx);
+            for (int cz = 0; cz < cellsXZ; cz++) {
+                for (int cy = cellsY - 1; cy >= 0; cy--) {
+                    noiseChunk.selectCellYZ(cy, cz);
+                    for (int inCellY = cellHeight - 1; inCellY >= 0; inCellY--) {
+                        int absY = (firstCellY + cy) * cellHeight + inCellY;
+                        noiseChunk.updateForY(absY, (double) inCellY / (double) cellHeight);
+                        for (int inCellX = 0; inCellX < cellWidth; inCellX++) {
+                            int absX = chunkPos.getMinBlockX() + cx * cellWidth + inCellX;
+                            noiseChunk.updateForX(absX, (double) inCellX / (double) cellWidth);
+                            for (int inCellZ = 0; inCellZ < cellWidth; inCellZ++) {
+                                int absZ = chunkPos.getMinBlockZ() + cz * cellWidth + inCellZ;
+                                noiseChunk.updateForZ(absZ, (double) inCellZ / (double) cellWidth);
+                                BlockState block = noiseChunk.nextBlockState();
+                                if (block == null) {
+                                    block = settings.defaultBlock();
+                                }
+                                if (block.isAir()) {
+                                    continue;
+                                }
+                                if (block.getFluidState().isEmpty()) {
+                                    block = applyStrataRule(absX, absY, absZ, block);
+                                    if (block.isAir()) {
+                                        continue;
+                                    }
+                                }
+                                states.set(inCellX + cx * cellWidth, absY & 15, inCellZ + cz * cellWidth, block);
+                            }
+                        }
+                    }
+                }
+            }
+            noiseChunk.swapSlices();
+        }
+        noiseChunk.stopInterpolation();
+    }
+
+    /**
+     * Depth strata for extension cubes, mirroring vanilla's surface rules: deepslate gradient
+     * below y=8 (for stone-based dimensions) and an optional noisy bedrock floor at the world
+     * bottom. The band's own bedrock is handled by {@code StateRuleMixin} during vanilla surface.
+     */
+    private BlockState applyStrataRule(int x, int y, int z, BlockState block) {
+        if (block == settings.defaultBlock() && deepslateStrata) {
+            if (y <= 0) {
+                block = Blocks.DEEPSLATE.defaultBlockState();
+            } else if (y < 8 && hash01(x, y, z) < (8.0 - y) / 8.0) {
+                block = Blocks.DEEPSLATE.defaultBlockState();
+            }
+        }
+        if (CubicConfig.DEEP_BEDROCK_FLOOR.get() && block == Blocks.DEEPSLATE.defaultBlockState()) {
+            int floor = this.state.minY();
+            if (y <= floor + 4) {
+                double fade = (floor + 4.0 - y) / 4.0; // 1 at floor, 0 at floor+4
+                if (y == floor || hash01(x, y, z) < fade) {
+                    block = Blocks.BEDROCK.defaultBlockState();
+                }
+            }
+        }
+        return block;
+    }
+
+    /** Fallback for dimensions without a NoiseBasedChunkGenerator: vanilla-ish strata only. */
+    private void fillFallback(int cubeMinY, PalettedContainer<BlockState> states) {
+        boolean netherLike = level.dimensionType().ultraWarm();
+        BlockState base = netherLike ? Blocks.NETHERRACK.defaultBlockState() : Blocks.STONE.defaultBlockState();
+        BlockState deep = netherLike ? Blocks.NETHERRACK.defaultBlockState() : Blocks.DEEPSLATE.defaultBlockState();
+        for (int y = 0; y < 16; y++) {
+            int absY = cubeMinY + y;
+            BlockState layer = absY <= 0 ? deep : base;
+            for (int x = 0; x < 16; x++) {
+                for (int z = 0; z < 16; z++) {
+                    states.set(x, y, z, layer);
+                }
+            }
+        }
+    }
+
+    /**
+     * Biomes are sampled at the cube's real (deep) Y position. While sampling, the climate-sampler
+     * remap is active so deep coordinates resolve to vanilla cave biomes (deterministic per seed).
+     */
+    private void fillBiomes(int cubeMinY, ChunkPos chunkPos, PalettedContainer<Holder<Biome>> biomes) {
+        BiomeSource source = generator.getBiomeSource();
+        Climate.Sampler sampler = randomState != null ? randomState.sampler() : null;
+        if (sampler == null) {
+            return; // plains default everywhere; only features/spawns care
+        }
+        boolean remap = CubicConfig.REMAP_DEEP_BIOMES.get();
+        WorldGenState.REMAP_DEEP_BIOMES.set(remap);
+        try {
+            for (int qx = 0; qx < 4; qx++) {
+                for (int qz = 0; qz < 4; qz++) {
+                    int qX = QuartPos.fromBlock(chunkPos.getMinBlockX() + qx * 4 + 2);
+                    int qZ = QuartPos.fromBlock(chunkPos.getMinBlockZ() + qz * 4 + 2);
+                    for (int qy = 0; qy < 4; qy++) {
+                        int sampleY = QuartPos.fromBlock(cubeMinY + qy * 4 + 2);
+                        Holder<Biome> biome = source.getNoiseBiome(qX, sampleY, qZ, sampler);
+                        biomes.set(qx, qy, qz, biome);
+                    }
+                }
+            }
+        } finally {
+            WorldGenState.REMAP_DEEP_BIOMES.set(false);
+        }
+    }
+
+    /** Vanilla {@code NoiseBasedChunkGenerator#createFluidPicker}, replicated. */
+    private static Aquifer.FluidPicker createFluidPicker(NoiseGeneratorSettings settings) {
+        Aquifer.FluidStatus lava = new Aquifer.FluidStatus(-54, Blocks.LAVA.defaultBlockState());
+        int seaLevel = settings.seaLevel();
+        Aquifer.FluidStatus water = new Aquifer.FluidStatus(seaLevel, settings.defaultFluid());
+        return (x, y, z) -> y < Math.min(-54, seaLevel) ? lava : water;
+    }
+
+    /** Deterministic per-position pseudo-random in [0, 1). */
+    private static double hash01(int x, int y, int z) {
+        long h = x * 0x8F3DA95BL ^ y * 0xC2B2AE35L ^ z * 0x27D4EB2FL;
+        h ^= h >>> 33;
+        h *= 0xFF51AFD7ED558CCDL;
+        h ^= h >>> 33;
+        h = Long.rotateLeft(h, 21) * 0x9FB21C651E98DF25L;
+        h ^= h >>> 29;
+        return (h & 0xFFFFFF) / (double) 0x1000000;
+    }
+}
