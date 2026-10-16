@@ -11,44 +11,48 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Vanilla floods every air pocket below y=-54 with lava aquifers; extended to any depth that
- * means the entire deep world is lava. Below the band we keep vanilla's aquifer *shapes* but
- * swap lava for water pockets (or dry cave air), matching the shallow band's feel. The vanilla
- * band (y >= -64) is untouched.
+ * Lava policy for extended worlds: below y=-54 vanilla floods every aquifer with lava, which at
+ * -2048 depth would make the deep world an unmineable lava sea. Instead, lava exists only near
+ * the bottom of the modded range ({@code worldMinY .. worldMinY + lavaNearFloorDepth}); everywhere
+ * else below -54, aquifer shapes are kept but lava becomes water pockets (local aquifer) or dry
+ * cave air (the global-picker shortcut). The vanilla band above -54 is untouched, and the nether
+ * (disabled aquifers) is unaffected.
  */
 @Mixin(targets = "net.minecraft.world.level.levelgen.Aquifer$NoiseBasedAquifer")
 public abstract class NoiseBasedAquiferMixin {
 
-    /**
-     * Local aquifer fluid: below the band, vanilla's erosion-based lava choice becomes water at
-     * sea level (like shallow aquifers).
-     */
+    /** Lava is kept only at or below this Y for the current world floor. */
+    private static int lavaZoneTop() {
+        Integer floor = CubicConfig.extensionMinY();
+        if (floor == null) {
+            return Integer.MIN_VALUE;
+        }
+        return floor + CubicConfig.LAVA_NEAR_FLOOR_DEPTH.get();
+    }
+
     @Inject(method = "computeFluid", at = @At("RETURN"), cancellable = true)
-    private void cubicchunks$deepWaterNotLava(int x, int y, int z, CallbackInfoReturnable<Aquifer.FluidStatus> cir) {
-        if (y >= -64) {
-            return; // vanilla band keeps vanilla lava rules
+    private void cubicchunks$deepFluidPolicy(int x, int y, int z, CallbackInfoReturnable<Aquifer.FluidStatus> cir) {
+        if (y >= -54) {
+            return; // vanilla band keeps vanilla rules
         }
         Aquifer.FluidStatus status = cir.getReturnValue();
         if (status == null) {
             return;
         }
         BlockState fluid = ((FluidStatusAccessor) (Object) status).cubicchunks$fluidType();
-        if (fluid != null && fluid.is(Blocks.LAVA)) {
+        if (fluid != null && fluid.is(Blocks.LAVA) && y > lavaZoneTop()) {
             cir.setReturnValue(new Aquifer.FluidStatus(y, Blocks.WATER.defaultBlockState()));
         }
     }
 
-    /**
-     * The global fluid picker shortcut returns lava directly for any pocket below y=-54; below
-     * the band that becomes dry cave air (water pockets still arrive via the local aquifer).
-     */
     @Inject(method = "computeSubstance", at = @At("RETURN"), cancellable = true)
     private void cubicchunks$deepDryCaves(DensityFunction.FunctionContext context, double density, CallbackInfoReturnable<BlockState> cir) {
-        if (context.blockY() >= -64) {
-            return; // vanilla band keeps vanilla lava rules
+        int y = context.blockY();
+        if (y >= -54) {
+            return; // vanilla band keeps vanilla rules
         }
         BlockState state = cir.getReturnValue();
-        if (state != null && state.is(Blocks.LAVA)) {
+        if (state != null && state.is(Blocks.LAVA) && y > lavaZoneTop()) {
             cir.setReturnValue(Blocks.CAVE_AIR.defaultBlockState());
         }
     }

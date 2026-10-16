@@ -14,7 +14,8 @@
     "SurfaceRulesContextAccessor",
     "ClimateSamplerMixin",
     "CountPlacementMixin",
-    "RepeatingPlacementMixin"
+    "RepeatingPlacementMixin",
+    "WorldCarverMixin"
   ],
   "client": [
     "ClientLevelMixin",

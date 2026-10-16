@@ -121,6 +121,7 @@ public final class ExtensionCubeManager {
         flushResends();
         CubicChunks.LOGGER.info("[CubicChunks] pre-generated {} extension cubes (radius {}) in {} ms",
                 done, radius, (System.nanoTime() - startNanos) / 1_000_000);
+        debugReportCubeComposition(spawn);
     }
 
     /**
@@ -132,8 +133,9 @@ public final class ExtensionCubeManager {
         if (chunk == null) {
             return;
         }
-        int air = 0, solid = 0, fluid = 0, other = 0;
-        int cubes = 0;
+        int[] air = new int[2], solid = new int[2], fluid = new int[2], lava = new int[2], other = new int[2];
+        int[] cubes = new int[2];
+        int nearFloorStart = state.minSection() + CubicConfig.LAVA_NEAR_FLOOR_DEPTH.get() / 16 + 1;
         for (int sy = generator.bandMinSection() - 1; sy >= state.minSection(); sy--) {
             long key = SectionPos.asLong(pos.x, sy, pos.z);
             if (!generated.contains(key)) {
@@ -144,33 +146,38 @@ public final class ExtensionCubeManager {
                 continue;
             }
             LevelChunkSection section = chunk.getSections()[idx];
-            cubes++;
+            int zone = sy >= nearFloorStart ? 0 : 1; // 0 = above the near-floor zone, 1 = near-floor lava zone
+            cubes[zone]++;
             for (int x = 0; x < 16; x++) {
                 for (int y = 0; y < 16; y++) {
                     for (int z = 0; z < 16; z++) {
                         var state = section.getBlockState(x, y, z);
                         if (state.isAir()) {
-                            air++;
+                            air[zone]++;
+                        } else if (state.is(net.minecraft.world.level.block.Blocks.LAVA)) {
+                            lava[zone]++;
                         } else if (!state.getFluidState().isEmpty()) {
-                            fluid++;
+                            fluid[zone]++;
                         } else if (state.is(net.minecraft.world.level.block.Blocks.DEEPSLATE)
                                 || state.is(net.minecraft.world.level.block.Blocks.STONE)
                                 || state.is(net.minecraft.world.level.block.Blocks.BEDROCK)) {
-                            solid++;
+                            solid[zone]++;
                         } else {
-                            other++;
+                            other[zone]++;
                         }
                     }
                 }
             }
         }
-        int total = air + solid + fluid + other;
-        if (total > 0) {
-            CubicChunks.LOGGER.info(
-                    "[CubicChunks] cube composition in {} ({} cubes): {:.0f}% air, {:.0f}% stone/deepslate/bedrock, {:.0f}% fluid, {:.0f}% other"
-                            .replace("{:.0f}", "%d"),
-                    pos, cubes,
-                    air * 100 / total, solid * 100 / total, fluid * 100 / total, other * 100 / total);
+        for (int zone = 1; zone >= 0; zone--) {
+            int total = air[zone] + solid[zone] + fluid[zone] + lava[zone] + other[zone];
+            if (total > 0) {
+                CubicChunks.LOGGER.info(
+                        "[CubicChunks] cube composition in {} [{}] ({} cubes): {}% air, {}% stone/deepslate/bedrock, {}% water, {}% lava, {}% other",
+                        pos, zone == 0 ? "above the near-floor lava zone" : "near-floor lava zone", cubes[zone],
+                        air[zone] * 100 / total, solid[zone] * 100 / total,
+                        fluid[zone] * 100 / total, lava[zone] * 100 / total, other[zone] * 100 / total);
+            }
         }
     }
 
@@ -185,10 +192,14 @@ public final class ExtensionCubeManager {
     }
 
     public void serverTick() {
-        // 4-tick cadence amortizes the scan; the work budget smooths spikes.
-        if (this.level.getServer().getTickCount() % 4 == 0) {
+        // 2-tick cadence amortizes the scan; the work budget smooths spikes.
+        if (this.level.getServer().getTickCount() % 2 == 0) {
             buildWorkQueue();
         }
+
+        // Safety net: the cube directly below each player's feet must exist before they can
+        // fall into it, even if the budgeted streamer hasn't caught up yet.
+        emergencyCatchUp();
 
         int budget = CubicConfig.GENERATION_PER_TICK.get();
         while (budget > 0 && !workQueue.isEmpty()) {
@@ -211,14 +222,18 @@ public final class ExtensionCubeManager {
                 continue;
             }
             int eye = SectionPos.blockToSectionCoord(Mth.floor(player.getY()));
+            // Below the player we stream deeper than above: digging/falling must never outrun
+            // generation, and pre-generating a margin below makes deep descents seamless.
+            int belowDist = vert + FALL_MARGIN_CUBES;
             int yMax = Math.min(eye + vert, zoneTop);
-            int yMin = Math.max(eye - vert, state.minSection());
+            int yMin = Math.max(eye - belowDist, state.minSection());
             if (yMin > yMax) {
                 continue;
             }
             final int yMinF = yMin;
             final int yMaxF = yMax;
             final int eyeF = eye;
+            final int belowDistF = belowDist;
             final int vertF = vert;
             // Nearest columns first so cubes materialize around the player, not at the fringes.
             List<ChunkPos> columns = new ArrayList<>();
@@ -227,12 +242,12 @@ public final class ExtensionCubeManager {
             columns.sort((a, b) -> Double.compare(
                     distanceSq(playerChunk, a), distanceSq(playerChunk, b)));
             for (ChunkPos colPos : columns) {
-                for (int dy = 0; dy <= vertF * 2; dy++) {
+                for (int dy = 0; dy <= belowDistF + vertF; dy++) {
                     int below = eyeF - dy;
                     if (below >= yMinF && below <= yMaxF) {
                         workQueue.addLast(SectionPos.asLong(colPos.x, below, colPos.z));
                     }
-                    if (dy > 0) {
+                    if (dy > 0 && dy <= vertF) {
                         int above = eyeF + dy;
                         if (above >= yMinF && above <= yMaxF) {
                             workQueue.addLast(SectionPos.asLong(colPos.x, above, colPos.z));
@@ -296,6 +311,35 @@ public final class ExtensionCubeManager {
 
     private void markResend(ChunkPos pos) {
         resendQueue.add(pos);
+    }
+
+    /** Extra cubes streamed below each player's eye, so descents never outrun generation. */
+    private static final int FALL_MARGIN_CUBES = 4;
+
+    /**
+     * Guarantee: the cube directly below each player's feet always exists (unless the player's
+     * own body cube would be filled, which would suffocate them). Runs synchronously, outside the
+     * generation budget — this is what prevents falling into ungenerated void while digging down.
+     */
+    private void emergencyCatchUp() {
+        for (ServerPlayer player : level.getPlayers(p -> true)) {
+            int bodyY = Mth.floor(player.getY());
+            int bodyCube = SectionPos.blockToSectionCoord(bodyY);
+            if (bodyCube >= generator.bandMinSection() || bodyCube < state.minSection()) {
+                continue; // not in the extension zone
+            }
+            int belowCube = SectionPos.blockToSectionCoord(bodyY - 1);
+            if (belowCube >= generator.bandMinSection()) {
+                belowCube = bodyCube - 1; // strictly below the body cube
+            }
+            if (belowCube < state.minSection()) {
+                continue;
+            }
+            long key = SectionPos.asLong(player.chunkPosition().x, belowCube, player.chunkPosition().z);
+            if (!generated.contains(key)) {
+                considerCube(key);
+            }
+        }
     }
 
     private void flushResends() {

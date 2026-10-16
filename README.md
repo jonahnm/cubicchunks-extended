@@ -55,6 +55,9 @@ deepBedrockFloor = true
 # Map biomes below the band onto vanilla cave biomes (dripstone/lush/deep dark) instead of
 # letting climate extrapolation produce nonsense biomes at extreme depth.
 deepBiomeRemap = true
+# No lava below y=-54; lava exists only within this many blocks above the world floor
+# (worldMinY). Set 0 for no deep lava at all.
+lavaNearFloorDepth = 32
 
 [debug]
 # <0 disables. If >=0, pre-generates that many extension sections below spawn at startup.
@@ -94,8 +97,10 @@ Global worldgen mixins (inspired by and credited to the C2Chunks reference imple
 - `AbsoluteVerticalAnchorMixin` + `CountPlacementMixin` / `RepeatingPlacementMixin` — depth-scale
   negative feature anchors and compensate placement counts, but only while the extension planner
   evaluates (vanilla band decoration is untouched, staying vanilla-exact).
-- `NoiseBasedAquiferMixin` — deep aquifers keep their shapes but lava becomes water pockets/dry
-  caves (vanilla floods everything below y=-54 with lava).
+- `NoiseBasedAquiferMixin` + `WorldCarverMixin` — no lava below y=-54 (vanilla floods everything
+  below that line with lava); lava exists only near the bottom of the modded range
+  (`lavaNearFloorDepth` above `worldMinY`), so deep caves are dry/water-pockmarked and the world
+  floor keeps a lava belt.
 - `StateRuleMixin` — relocates the bedrock floor to the configured world bottom; the vanilla band
   floor at y=-64 becomes deepslate (configurable).
 - `ClimateSamplerMixin` — maps deep biome sampling onto vanilla cave biomes.

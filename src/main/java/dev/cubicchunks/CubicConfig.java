@@ -30,6 +30,7 @@ public final class CubicConfig {
 
     public static final ModConfigSpec.BooleanValue DEEP_BEDROCK_FLOOR;
     public static final ModConfigSpec.BooleanValue REMAP_DEEP_BIOMES;
+    public static final ModConfigSpec.IntValue LAVA_NEAR_FLOOR_DEPTH;
 
     public static final ModConfigSpec.IntValue DEBUG_PREGEN_SECTIONS;
     public static final ModConfigSpec.IntValue DEBUG_PREGEN_RADIUS;
@@ -91,6 +92,9 @@ public final class CubicConfig {
         b.comment("Map biomes below the vanilla band onto vanilla cave biomes (otherwise climate",
                 "extrapolation below the band produces nonsense biomes).");
         REMAP_DEEP_BIOMES = b.define("deepBiomeRemap", true);
+        b.comment("No lava below y=-54; lava exists only within this many blocks above the world",
+                "floor (worldMinY). Set 0 for no deep lava at all.");
+        LAVA_NEAR_FLOOR_DEPTH = b.defineInRange("lavaNearFloorDepth", 32, 0, 1000000);
         b.pop();
 
         b.comment("Development aids; not for release worlds.").push("debug");
