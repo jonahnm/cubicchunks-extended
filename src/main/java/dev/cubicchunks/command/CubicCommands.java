@@ -24,6 +24,9 @@ public final class CubicCommands {
                 .then(Commands.literal("tp")
                         .then(Commands.argument("y", IntegerArgumentType.integer())
                                 .executes(ctx -> teleport(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "y")))))
+                .then(Commands.literal("verifyall")
+                        .then(Commands.argument("radius", IntegerArgumentType.integer(0, 4))
+                                .executes(ctx -> verifyAll(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius")))))
                 .then(Commands.literal("verify")
                         .then(Commands.argument("y", IntegerArgumentType.integer())
                                 .executes(ctx -> verify(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "y")))))
@@ -52,6 +55,23 @@ public final class CubicCommands {
         source.sendSuccess(() -> Component.literal(String.format(
                 "Effective Y range in %s: [%d, %d)",
                 level.dimension().location(), level.getMinBuildHeight(), level.getMaxBuildHeight())), false);
+        return 1;
+    }
+
+    private static int verifyAll(CommandSourceStack source, int radius) {
+        ServerLevel level = source.getLevel();
+        dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);
+        if (manager == null) {
+            source.sendFailure(Component.literal("Dimension " + level.dimension().location() + " is not cubic-enabled."));
+            return 0;
+        }
+        var center = source.getPlayer() != null
+                ? source.getPlayer().chunkPosition()
+                : new net.minecraft.world.level.ChunkPos(level.getSharedSpawnPos());
+        manager.startVerifyAll(radius, center);
+        source.sendSuccess(() -> Component.literal(
+                "[CubicChunks] bulk verification started across " + (2 * radius + 1) * (2 * radius + 1)
+                        + " columns (one column per tick) — watch the server log."), false);
         return 1;
     }
 

@@ -22,6 +22,7 @@ import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.OnDatapackSyncEvent;
+import net.neoforged.neoforge.event.level.ChunkDataEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.level.LevelEvent;
@@ -60,6 +61,8 @@ public final class CubicChunks {
         NeoForge.EVENT_BUS.addListener(this::onPlayerRespawn);
         NeoForge.EVENT_BUS.addListener(this::onDatapackSync);
         NeoForge.EVENT_BUS.addListener(this::onServerStarted);
+        NeoForge.EVENT_BUS.addListener(this::onChunkDataSave);
+        NeoForge.EVENT_BUS.addListener(this::onChunkDataLoad);
         LOGGER.info("Cubic Chunks Extended initialised");
     }
 
@@ -191,6 +194,33 @@ public final class CubicChunks {
             for (ExtensionCubeManager manager : MANAGERS.values()) {
                 manager.debugPregenAroundSpawn(pregen, radius);
             }
+        }
+    }
+
+    /** Persists which extension cubes this mod generated, per column. */
+    private void onChunkDataSave(ChunkDataEvent.Save event) {
+        if (!(event.getLevel() instanceof ServerLevel serverLevel)
+                || !(MANAGERS.get(serverLevel.dimension()) instanceof ExtensionCubeManager manager)) {
+            return;
+        }
+        long[] bits = manager.generatedBitsetFor(event.getChunk().getPos());
+        if (bits != null) {
+            event.getData().putLongArray("CubicGeneratedSections", bits);
+        }
+    }
+
+    /** Restores the generated-marker (with a composition heuristic for older worlds). */
+    private void onChunkDataLoad(ChunkDataEvent.Load event) {
+        if (!(event.getLevel() instanceof ServerLevel serverLevel)
+                || !(MANAGERS.get(serverLevel.dimension()) instanceof ExtensionCubeManager manager)) {
+            return;
+        }
+        long[] bits = event.getData().getLongArray("CubicGeneratedSections");
+        var pos = event.getChunk().getPos();
+        if (bits.length > 0) {
+            manager.applyGeneratedBitset(pos, bits);
+        } else if (event.getChunk() instanceof net.minecraft.world.level.chunk.LevelChunk levelChunk) {
+            manager.markLikelyGeneratedFromChunk(pos, levelChunk);
         }
     }
 
