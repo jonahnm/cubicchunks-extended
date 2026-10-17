@@ -88,6 +88,15 @@ public final class ExtensionCubeManager {
         return generated.size();
     }
 
+    /** Debug: ensures the extension cube containing {@code y} in this column exists. */
+    public boolean debugEnsureCube(ChunkPos colPos, int y) {
+        int sy = SectionPos.blockToSectionCoord(y);
+        if (sy >= generator.bandMinSection() || sy < state.minSection()) {
+            return false;
+        }
+        return considerCube(SectionPos.asLong(colPos.x, sy, colPos.z));
+    }
+
     /** Test aid: synchronously generate {@code depth} extension cubes below spawn (ring of columns). */
     public void debugPregenAroundSpawn(int depth, int radius) {
         ChunkPos spawn = new ChunkPos(level.getSharedSpawnPos());
@@ -437,6 +446,11 @@ public final class ExtensionCubeManager {
                     innerIndex++;
                     continue;
                 }
+                // lava policy: vanilla lava springs must not place lava outside the near-floor zone
+                if (isLavaSpring(holder) && cubeMinY > lavaZoneTop()) {
+                    innerIndex++;
+                    continue;
+                }
                 RandomSource rand = RandomSource.create(
                         seed + chunkPos.toLong() + sectionY * 1000003587L
                                 + stepIndex * 10000019L + innerIndex * 34187003L);
@@ -491,6 +505,17 @@ public final class ExtensionCubeManager {
         double extendedRange = -64.0 - minY;
         double depthFactor = (320.0 + 4.0 * extendedRange) / 320.0;
         return vertical * depthFactor;
+    }
+
+    private static int lavaZoneTop() {
+        Integer floor = CubicConfig.extensionMinY();
+        return floor == null ? Integer.MIN_VALUE : floor + CubicConfig.LAVA_NEAR_FLOOR_DEPTH.get();
+    }
+
+    private static boolean isLavaSpring(Holder<PlacedFeature> holder) {
+        return holder.unwrapKey()
+                .map(k -> k.location().equals(net.minecraft.resources.ResourceLocation.withDefaultNamespace("spring_lava")))
+                .orElse(false);
     }
 
     /** Underground features only: height-anchored placements, not surface/heightmap-anchored. */

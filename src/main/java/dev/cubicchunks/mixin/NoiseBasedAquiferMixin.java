@@ -41,7 +41,8 @@ public abstract class NoiseBasedAquiferMixin {
         }
         BlockState fluid = ((FluidStatusAccessor) (Object) status).cubicchunks$fluidType();
         if (fluid != null && fluid.is(Blocks.LAVA) && y > lavaZoneTop()) {
-            cir.setReturnValue(new Aquifer.FluidStatus(y, Blocks.WATER.defaultBlockState()));
+            // dry: level y + cave air keeps the pocket shape without perched water columns
+            cir.setReturnValue(new Aquifer.FluidStatus(y, Blocks.CAVE_AIR.defaultBlockState()));
         }
     }
 

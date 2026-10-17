@@ -322,6 +322,121 @@ public final class ExtensionGenerator {
         }
     }
 
+    /**
+     * Debug: regenerates the cube at {@code sectionY} through a FULL-COLUMN extended NoiseChunk
+     * (vanilla's exact path over the whole modded range) and diffs it against the installed
+     * per-cube section. Proves (or disproves) that per-cube generation matches full-column.
+     */
+    public String verifyAgainstFullColumn(LevelChunk chunk, int sectionY) {
+        int cubeMinY = sectionY << 4;
+        ChunkPos chunkPos = chunk.getPos();
+        NoiseSettings base = settings.noiseSettings();
+        NoiseSettings fullSettings = new NoiseSettings(
+                state.minY(), state.maxY() - state.minY(),
+                base.noiseSizeHorizontal(), base.noiseSizeVertical());
+        NoiseGeneratorSettings fullGenSettings = new NoiseGeneratorSettings(
+                fullSettings,
+                settings.defaultBlock(),
+                settings.defaultFluid(),
+                settings.noiseRouter(),
+                settings.surfaceRule(),
+                settings.spawnTarget(),
+                settings.seaLevel(),
+                settings.disableMobGeneration(),
+                settings.isAquifersEnabled(),
+                settings.oreVeinsEnabled(),
+                settings.useLegacyRandomSource());
+        CubeNoiseChunk noiseChunk = new CubeNoiseChunk(
+                16 / fullSettings.getCellWidth(),
+                randomState,
+                chunkPos.getMinBlockX(),
+                chunkPos.getMinBlockZ(),
+                fullSettings,
+                fullGenSettings,
+                fluidPicker);
+
+        int cellWidth = fullSettings.getCellWidth();
+        int cellHeight = fullSettings.getCellHeight();
+        int cellsXZ = 16 / cellWidth;
+        int cellsY = Math.floorDiv(fullSettings.height(), cellHeight);
+        int firstCellY = Math.floorDiv(fullSettings.minY(), cellHeight);
+
+        LevelChunkSection installed = chunk.getSections()[chunk.getSectionIndexFromSectionY(sectionY)];
+        int mismatches = 0;
+        int checked = 0;
+        String firstSamples = "";
+
+        noiseChunk.initializeForFirstCellX();
+        for (int cx = 0; cx < cellsXZ; cx++) {
+            noiseChunk.advanceCellX(cx);
+            for (int cz = 0; cz < cellsXZ; cz++) {
+                for (int cy = cellsY - 1; cy >= 0; cy--) {
+                    int cellBaseY = (firstCellY + cy) * cellHeight;
+                    boolean inCube = cellBaseY + cellHeight > cubeMinY && cellBaseY < cubeMinY + 16;
+                    noiseChunk.selectCellYZ(cy, cz);
+                    int yStart = inCube ? Math.max(cellHeight - 1, cubeMinY + 15 - cellBaseY > cellHeight - 1 ? cellHeight - 1 : cubeMinY + 15 - cellBaseY) : -1;
+                    for (int inCellY = cellHeight - 1; inCellY >= 0; inCellY--) {
+                        int absY = cellBaseY + inCellY;
+                        boolean blockInCube = absY >= cubeMinY && absY < cubeMinY + 16;
+                        if (!blockInCube) {
+                            // still drive the interpolator state for correctness
+                            noiseChunk.updateForY(absY, (double) inCellY / (double) cellHeight);
+                            for (int inCellX = 0; inCellX < cellWidth; inCellX++) {
+                                noiseChunk.updateForX(chunkPos.getMinBlockX() + cx * cellWidth + inCellX,
+                                        (double) inCellX / (double) cellWidth);
+                                for (int inCellZ = 0; inCellZ < cellWidth; inCellZ++) {
+                                    noiseChunk.updateForZ(chunkPos.getMinBlockZ() + cz * cellWidth + inCellZ,
+                                            (double) inCellZ / (double) cellWidth);
+                                }
+                            }
+                            continue;
+                        }
+                        noiseChunk.updateForY(absY, (double) inCellY / (double) cellHeight);
+                        for (int inCellX = 0; inCellX < cellWidth; inCellX++) {
+                            int absX = chunkPos.getMinBlockX() + cx * cellWidth + inCellX;
+                            noiseChunk.updateForX(absX, (double) inCellX / (double) cellWidth);
+                            for (int inCellZ = 0; inCellZ < cellWidth; inCellZ++) {
+                                int absZ = chunkPos.getMinBlockZ() + cz * cellWidth + inCellZ;
+                                noiseChunk.updateForZ(absZ, (double) inCellZ / (double) cellWidth);
+                                BlockState expected = noiseChunk.nextBlockState();
+                                if (expected == null) {
+                                    expected = settings.defaultBlock();
+                                }
+                                if (expected.isAir()) {
+                                    continue;
+                                }
+                                if (expected.getFluidState().isEmpty()) {
+                                    expected = applyStrataRule(absX, absY, absZ, expected);
+                                    if (expected.isAir()) {
+                                        continue;
+                                    }
+                                }
+                                BlockState actual = installed.getBlockState(
+                                        absX & 15, absY & 15, absZ & 15);
+                                if (actual.isAir() && expected.is(Blocks.CAVE_AIR)) {
+                                    continue; // aquifer air conversion equivalence
+                                }
+                                checked++;
+                                if (actual.getBlock() != expected.getBlock()) {
+                                    mismatches++;
+                                    if (mismatches <= 5) {
+                                        firstSamples += String.format("[%d %d %d] exp=%s got=%s; ",
+                                                absX, absY, absZ,
+                                                expected.getBlock(), actual.getBlock());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            noiseChunk.swapSlices();
+        }
+        noiseChunk.stopInterpolation();
+        return String.format("cube %s @y=%d: checked %d blocks, %d mismatches. %s",
+                chunkPos, cubeMinY, checked, mismatches, firstSamples);
+    }
+
     /** Vanilla {@code NoiseBasedChunkGenerator#createFluidPicker}, replicated. */
     private static Aquifer.FluidPicker createFluidPicker(NoiseGeneratorSettings settings) {
         Aquifer.FluidStatus lava = new Aquifer.FluidStatus(-54, Blocks.LAVA.defaultBlockState());

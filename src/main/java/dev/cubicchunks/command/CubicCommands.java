@@ -24,6 +24,9 @@ public final class CubicCommands {
                 .then(Commands.literal("tp")
                         .then(Commands.argument("y", IntegerArgumentType.integer())
                                 .executes(ctx -> teleport(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "y")))))
+                .then(Commands.literal("verify")
+                        .then(Commands.argument("y", IntegerArgumentType.integer())
+                                .executes(ctx -> verify(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "y")))))
                 .then(Commands.literal("bounds")
                         .executes(ctx -> bounds(ctx.getSource()))));
     }
@@ -49,6 +52,29 @@ public final class CubicCommands {
         source.sendSuccess(() -> Component.literal(String.format(
                 "Effective Y range in %s: [%d, %d)",
                 level.dimension().location(), level.getMinBuildHeight(), level.getMaxBuildHeight())), false);
+        return 1;
+    }
+
+    private static int verify(CommandSourceStack source, int y) {
+        ServerLevel level = source.getLevel();
+        dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);
+        if (manager == null) {
+            source.sendFailure(Component.literal("Dimension " + level.dimension().location() + " is not cubic-enabled."));
+            return 0;
+        }
+        var pos = source.getPlayer() != null
+                ? source.getPlayer().chunkPosition()
+                : new net.minecraft.world.level.ChunkPos(level.getSharedSpawnPos());
+        boolean generated = manager.debugEnsureCube(pos, y);
+        var chunk = level.getChunkSource().getChunkNow(pos.x, pos.z);
+        if (chunk == null) {
+            source.sendFailure(Component.literal("Column not loaded yet; move around and retry."));
+            return 0;
+        }
+        String report = manager.generator().verifyAgainstFullColumn(
+                chunk, net.minecraft.core.SectionPos.blockToSectionCoord(y));
+        source.sendSuccess(() -> Component.literal("[CubicChunks] verify: " + (generated ? "(generated now) " : "") + report), false);
+        CubicChunks.LOGGER.info("[CubicChunks] verify: {}", report);
         return 1;
     }
 
