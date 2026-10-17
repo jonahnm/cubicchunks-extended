@@ -58,10 +58,10 @@ deepBiomeRemap = true
 # No lava below y=-54; lava exists only within this many blocks above the world floor
 # (worldMinY). Set 0 for no deep lava at all.
 lavaNearFloorDepth = 32
-# Ores keep their vanilla Y ranges (they are NOT depth-scaled) and, when a range reaches
-# down to -64, that range is tiled downward through the deep world; every tiling
-# multiplies the placement count by (1 + n * oreDepthBonusPerStratum), so ore density
-# increases the deeper you go. 0 keeps ore density identical to vanilla per stratum.
+# Ores keep their vanilla Y ranges (no depth-scaling): each feature's native range is tiled
+# downward through the deep world, so an ore that generates at y=-64 keeps generating below the
+# band at the band's own per-block density, and each band-height stratum below multiplies that
+# density by (1 + stratum * this). Set 0 for constant density at exactly the band's.
 oreDepthBonusPerStratum = 0.5
 # Translate vanilla structures (ancient cities, villages, galleons, ...) into every
 # stratum below the band: each structure's pieces are NBT-copied and shifted down by
@@ -87,6 +87,11 @@ decoding (bounds are synced from the server at login; a stale client config is n
 - `/cubicchunks status` — current dimension's effective range, band window, generated cube count.
 - `/cubicchunks bounds` — effective `[minY, maxY)`.
 - `/cubicchunks tp <y>` — teleport yourself vertically (great for exploring the deep world).
+- `/cubicchunks regen [radius]` — rebuilds the terrain of the generated extension cubes (every
+  loaded column, or only those within `radius` columns of you) **without removing player changes**:
+  each cube is regenerated and merged over the installed one, so only blocks vanilla generation
+  could have produced are replaced; anything you placed stays, and structure interiors are re-placed
+  rather than filled solid.
 - `/cubicchunks verify <y>` — diff one generated cube at `<y>` against the full-column
   reference (vanilla noise evaluated over the whole modded range).
 - `/cubicchunks verifyall <radius>` — diff *every* generated cube in that many columns around
@@ -105,6 +110,13 @@ decoding (bounds are synced from the server at login; a stale client config is n
   player within their chunk tracking view (nearest columns first), generates missing cubes within a
   per-tick budget, lights them, places the cube's deep features, and re-sends chunks to tracking
   clients (capped per tick).
+  Two things make the per-cube work cheap and were the difference between unplayable and fine:
+  structure pieces are **indexed by section Y once per column** (built from the starts of already-
+  loaded columns, never from `StructureManager#startsForStructure`, which loads neighbours and
+  deadlocked worldgen at spawn), and each feature's native span is **measured once and cached**
+  instead of re-rolled per cube. In the test configuration that took pre-generating 900 deep
+  cubes from 24.8 s to 3.4 s (~3.8 ms/cube). The dominant leftover cost is the per-cube noise
+  setup itself, which is the price of true cubic streaming.
 - `gen/ExtensionGenerator` — builds a tiny per-cube `NoiseChunk` (`NoiseSettings(cubeY, 16, …)`)
   over the world's own `RandomState`, replaying `NoiseBasedChunkGenerator#doFill` over a 16-block
   window; applies deep strata (deepslate gradient, optional bedrock floor at the world bottom) and
@@ -121,12 +133,15 @@ Global worldgen mixins (inspired by and credited to the C2Chunks reference imple
   (a thread-local gate), so band decoration stays bit-for-bit vanilla. There is deliberately
   **no vertical anchor scaling** (`AbsoluteVerticalAnchorMixin` was dropped): ores keep their
   vanilla Y ranges.
-- Feature planning model (`core/ExtensionCubeManager.placeCubeFeatures`): per cube the planner
-  samples the vanilla-exact distribution against the *band* bounds, measures the feature's native
-  vertical span with a throwaway roll, then tiles that span downward — tile n is the same
-  placement shifted by `n * span` and gets `count * (1 + n * oreDepthBonusPerStratum)` attempts.
-  Writes are clipped to the cube window. Result: a vein whose vanilla range dips to y=-64 keeps
-  generating below the band, gets denser per stratum, and is unique per seed rather than a copy.
+- Feature planning model (`core/ExtensionCubeManager.placeCubeFeatures`): heights are sampled from the
+  *vanilla-exact* distribution against the band bounds — there is no anchor scaling at all, ores keep
+  their vanilla Y ranges. The feature's native vertical span is measured once and cached per feature,
+  and its range is then **tiled downward by that span**, so the space under the band is covered
+  continuously rather than only where vanilla's ranges happen to dip. Because one vanilla pass
+  scatters its blobs across the whole band height, each tile's count is scaled by span/band-height to
+  hold per-block density at the band's, then multiplied by `1 + stratum * oreDepthBonusPerStratum`
+  (stratum = band heights below the band): an ore that generates at y=-64 keeps generating below the
+  band at the band's own density, growing with depth. Writes are clipped to the cube window.
 - `core/DeepStructures` — translates vanilla structures into the deep world. Each piece is
   round-tripped through its own NBT (`StructurePiece#createTag`), the `BB`/`TP`/`POS` Y
   components are shifted by whole band periods, and **all strata are merged into one combined

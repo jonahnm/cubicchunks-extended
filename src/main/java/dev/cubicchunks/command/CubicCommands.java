@@ -8,6 +8,7 @@ import dev.cubicchunks.CubicConfig;
 import dev.cubicchunks.core.ExtensionCubeManager;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -31,7 +32,12 @@ public final class CubicCommands {
                         .then(Commands.argument("y", IntegerArgumentType.integer())
                                 .executes(ctx -> verify(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "y")))))
                 .then(Commands.literal("bounds")
-                        .executes(ctx -> bounds(ctx.getSource()))));
+                        .executes(ctx -> bounds(ctx.getSource())))
+                .then(Commands.literal("regen")
+                        .executes(ctx -> regen(ctx.getSource(), -1))
+                        .then(Commands.argument("radius", IntegerArgumentType.integer(0, 64))
+                                .executes(ctx -> regen(ctx.getSource(),
+                                        IntegerArgumentType.getInteger(ctx, "radius"))))));
     }
 
     private static int status(CommandSourceStack source) {
@@ -58,6 +64,30 @@ public final class CubicCommands {
         return 1;
     }
 
+    /**
+     * Rebuilds the terrain of the generated extension cubes without touching what the player put
+     * there: the fresh cube is merged over the installed one, so only blocks vanilla generation
+     * could have produced are replaced.
+     */
+    private static int regen(CommandSourceStack source, int radius) {
+        ServerLevel level = source.getLevel();
+        dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);
+        if (manager == null) {
+            source.sendFailure(Component.literal("Dimension " + level.dimension().location()
+                    + " is not cubic-enabled."));
+            return 0;
+        }
+        var center = source.getPlayer() != null
+                ? source.getPlayer().chunkPosition()
+                : new net.minecraft.world.level.ChunkPos(level.getSharedSpawnPos());
+        long startNanos = System.nanoTime();
+        int rebuilt = manager.regenerateGeneratedCubes(center, radius);
+        long tookMs = (System.nanoTime() - startNanos) / 1_000_000L;
+        source.sendSuccess(() -> Component.literal(String.format(
+                "[CubicChunks] regenerated %d extension cubes (%d ms); player changes and structure"
+                        + " interiors preserved.", rebuilt, tookMs)), false);
+        return 1;
+    }
     private static int verifyAll(CommandSourceStack source, int radius) {
         ServerLevel level = source.getLevel();
         dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);

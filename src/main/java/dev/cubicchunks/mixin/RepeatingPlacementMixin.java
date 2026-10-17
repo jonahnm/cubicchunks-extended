@@ -20,7 +20,7 @@ public abstract class RepeatingPlacementMixin {
     @Inject(method = "count", at = @At("RETURN"), cancellable = true)
     private void cubicchunks$scaleCount(RandomSource random, BlockPos pos, CallbackInfoReturnable<Integer> cir) {
         double multiplier = WorldGenState.CURRENT_MULTIPLIER.get();
-        if (multiplier > 1.0) {
+        if (multiplier != 1.0) {
             cir.setReturnValue((int) Math.round(cir.getReturnValue() * multiplier));
         }
     }

@@ -67,6 +67,15 @@ public final class ExtensionCubeManager {
     private final Set<ChunkPos> resendQueue = new HashSet<>();
 
     private final Set<Class<?>> complainedFeatureFailures = new HashSet<>();
+    /**
+     * Native Y span of each height-anchored feature, measured on first use and cached; see
+     * {@link #measureFeatureSpan}. Keyed by the feature instance, which is the same object for
+     * every column and cube, so one measurement serves the whole world.
+     */
+    private java.util.Map<PlacedFeature, Integer> vminOfFeature =
+            new java.util.HashMap<>();
+    private java.util.Map<PlacedFeature, Integer> spanOfFeature =
+            new java.util.HashMap<>();
     /** Full-column packets are expensive (193 sections); cap per tick to protect the tick budget. */
     private static final int MAX_RESENDS_PER_TICK = 12;
 
@@ -229,6 +238,40 @@ public final class ExtensionCubeManager {
         return considerCube(SectionPos.asLong(colPos.x, sy, colPos.z));
     }
 
+    /**
+     * Rebuilds the terrain of every extension cube known to be generated, in place: the fresh cube
+     * is merged over the installed one so only blocks vanilla generation could have produced are
+     * replaced - player-placed blocks, and the interior of structures that a plain terrain rebuild
+     * would fill solid, survive. Cubes of columns that are not loaded now are left untouched.
+     * @param center restrict the rebuild to this many columns around here, or pass a negative
+     *     radius for every column
+     * @return the number of cubes rebuilt
+     */
+    public int regenerateGeneratedCubes(ChunkPos center, int radius) {
+        var keys = new java.util.ArrayList<>(generated);
+        int rebuilt = 0;
+        for (long key : keys) {
+            int cx = SectionPos.x(key);
+            int cz = SectionPos.z(key);
+            if (radius >= 0 && Math.max(Math.abs(cx - center.x), Math.abs(cz - center.z)) > radius) {
+                continue;
+            }
+            int sy = SectionPos.y(key);
+            LevelChunk chunk = level.getChunkSource().getChunkNow(cx, cz);
+            if (chunk == null) {
+                continue;
+            }
+            int idx = chunk.getSectionIndexFromSectionY(sy);
+            LevelChunkSection[] sections = chunk.getSections();
+            if (idx < 0 || idx >= sections.length) {
+                continue;
+            }
+            generateAndApply(chunk, idx, sy, sections[idx]);
+            rebuilt++;
+        }
+        return rebuilt;
+    }
+
     /** Test aid: synchronously generate {@code depth} extension cubes below spawn (ring of columns). */
     public void debugPregenAroundSpawn(int depth, int radius) {
         ChunkPos spawn = new ChunkPos(level.getSharedSpawnPos());
@@ -272,7 +315,8 @@ public final class ExtensionCubeManager {
         if (chunk == null) {
             return;
         }
-        int[] air = new int[2], solid = new int[2], fluid = new int[2], lava = new int[2], other = new int[2];
+        int[] air = new int[2], solid = new int[2], fluid = new int[2], lava = new int[2],
+                other = new int[2], ore = new int[2];
         int[] cubes = new int[2];
         int nearFloorStart = state.minSection() + CubicConfig.LAVA_NEAR_FLOOR_DEPTH.get() / 16 + 1;
         for (int sy = generator.bandMinSection() - 1; sy >= state.minSection(); sy--) {
@@ -297,6 +341,10 @@ public final class ExtensionCubeManager {
                             lava[zone]++;
                         } else if (!state.getFluidState().isEmpty()) {
                             fluid[zone]++;
+                        } else if (net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()).getPath().endsWith("_ore")) {
+                            // counted apart from "other": tells whether the tiled ore ranges actually
+                            // reached this cube, which is what the band clipping used to hide
+                            ore[zone]++;
                         } else if (state.is(net.minecraft.world.level.block.Blocks.DEEPSLATE)
                                 || state.is(net.minecraft.world.level.block.Blocks.STONE)
                                 || state.is(net.minecraft.world.level.block.Blocks.BEDROCK)) {
@@ -309,13 +357,13 @@ public final class ExtensionCubeManager {
             }
         }
         for (int zone = 1; zone >= 0; zone--) {
-            int total = air[zone] + solid[zone] + fluid[zone] + lava[zone] + other[zone];
+            int total = air[zone] + solid[zone] + fluid[zone] + lava[zone] + other[zone] + ore[zone];
             if (total > 0) {
                 CubicChunks.LOGGER.info(
-                        "[CubicChunks] cube composition in {} [{}] ({} cubes): {}% air, {}% stone/deepslate/bedrock, {}% water, {}% lava, {}% other",
+                        "[CubicChunks] cube composition in {} [{}] ({} cubes): {}% air, {}% stone/deepslate/bedrock, {}% water, {}% lava, {}% ore, {}% other",
                         pos, zone == 0 ? "above the near-floor lava zone" : "near-floor lava zone", cubes[zone],
                         air[zone] * 100 / total, solid[zone] * 100 / total,
-                        fluid[zone] * 100 / total, lava[zone] * 100 / total, other[zone] * 100 / total);
+                        fluid[zone] * 100 / total, lava[zone] * 100 / total, ore[zone] * 100 / total, other[zone] * 100 / total);
             }
         }
     }
@@ -491,38 +539,93 @@ public final class ExtensionCubeManager {
      * Re-runs structure piece placement for pieces intersecting this cube. Structure interiors
      * place AIR explicitly, which the surgical terrain regen cannot preserve - so pieces are
      * re-applied on top of the fresh terrain, clipped to the cube.
+     *
+     * <p>The pieces of a column are indexed by section Y once, then reused for every cube of that
+     * column: asking {@link StructureManager} for starts (and scanning every piece of every start)
+     * for each cube would load neighbour chunks and cost cubes x pieces.
      */
     private void placeStructurePieces(LevelChunk chunk, int sectionY) {
         if (!CubicConfig.DEEP_STRUCTURES.get()) {
             return;
         }
-        int cubeMinY = sectionY << 4;
+        Map<Integer, java.util.List<StructurePiece>> index = pieceIndexForColumn(chunk);
+        java.util.List<StructurePiece> pieces = index.get(sectionY);
+        if (pieces == null) {
+            return;
+        }
         ChunkPos chunkPos = chunk.getPos();
+        int cubeMinY = sectionY << 4;
         BoundingBox cubeBox = new BoundingBox(
                 chunkPos.getMinBlockX(), cubeMinY, chunkPos.getMinBlockZ(),
                 chunkPos.getMinBlockX() + 15, cubeMinY + 15, chunkPos.getMinBlockZ() + 15);
         var structureManager = level.structureManager();
-        for (StructureStart start : structureManager.startsForStructure(chunkPos, s -> true)) {
-            for (StructurePiece piece : start.getPieces()) {
-                if (!piece.getBoundingBox().intersects(cubeBox)) {
-                    continue;
-                }
-                RandomSource rand = RandomSource.create(level.getSeed()
-                        ^ sectionY * 1000003587L ^ chunkPos.toLong()
-                        ^ System.identityHashCode(piece));
-                try {
-                    piece.postProcess(pieceAccess(chunk), structureManager, level.getChunkSource().getGenerator(),
-                            rand, cubeBox, chunkPos,
-                            new net.minecraft.core.BlockPos(chunkPos.getMinBlockX(), cubeMinY, chunkPos.getMinBlockZ()));
-                } catch (Throwable t) {
-                    if (complainedFeatureFailures.add(piece.getClass())) {
-                        CubicChunks.LOGGER.warn("[CubicChunks] deep piece placement failed (suppressing repeats): {}",
-                                t.toString());
-                    }
+        for (StructurePiece piece : pieces) {
+            if (!piece.getBoundingBox().intersects(cubeBox)) {
+                continue;
+            }
+            RandomSource rand = RandomSource.create(level.getSeed()
+                    ^ sectionY * 1000003587L ^ chunkPos.toLong()
+                    ^ System.identityHashCode(piece));
+            try {
+                piece.postProcess(pieceAccess(chunk), structureManager, level.getChunkSource().getGenerator(),
+                        rand, cubeBox, chunkPos,
+                        new net.minecraft.core.BlockPos(chunkPos.getMinBlockX(), cubeMinY, chunkPos.getMinBlockZ()));
+            } catch (Throwable t) {
+                if (complainedFeatureFailures.add(piece.getClass())) {
+                    CubicChunks.LOGGER.warn("[CubicChunks] deep piece placement failed (suppressing repeats): {}",
+                            t.toString());
                 }
             }
         }
     }
+
+    /** Section Y -> pieces, built from the starts of this and any already-loaded neighbour column. */
+    private Map<Integer, java.util.List<StructurePiece>> pieceIndexForColumn(LevelChunk chunk) {
+        ChunkPos origin = chunk.getPos();
+        long columnKey = origin.toLong();
+        if (indexedColumn == columnKey) {
+            return pieceIndex;
+        }
+        java.util.Map<Integer, java.util.List<StructurePiece>> index =
+                new java.util.HashMap<Integer, java.util.List<StructurePiece>>();
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                // loaded columns only: never trigger a chunk load from the tick loop
+                LevelChunk col = level.getChunkSource().getChunkNow(origin.x + dx, origin.z + dz);
+                if (col == null) {
+                    continue;
+                }
+                for (StructureStart start : col.getAllStarts().values()) {
+                    if (start == null || !start.isValid()) {
+                        continue;
+                    }
+                    for (StructurePiece piece : start.getPieces()) {
+                        BoundingBox bb = piece.getBoundingBox();
+                        // BoundingBox keeps its bounds private; the corners give the Y span.
+                        int[] ySpan = {Integer.MAX_VALUE, Integer.MIN_VALUE};
+                        bb.forAllCorners(pos -> {
+                            if (pos.getY() < ySpan[0]) {
+                                ySpan[0] = pos.getY();
+                            }
+                            if (pos.getY() > ySpan[1]) {
+                                ySpan[1] = pos.getY();
+                            }
+                        });
+                        for (int sy = SectionPos.blockToSectionCoord(ySpan[0]);
+                                sy <= SectionPos.blockToSectionCoord(ySpan[1]); sy++) {
+                            index.computeIfAbsent(sy, s -> new java.util.ArrayList<StructurePiece>()).add(piece);
+                        }
+                    }
+                }
+            }
+        }
+        indexedColumn = columnKey;
+        pieceIndex = index;
+        return index;
+    }
+
+    private long indexedColumn = Long.MIN_VALUE;
+    private Map<Integer, java.util.List<StructurePiece>> pieceIndex = java.util.Map.of();
 
     private dev.cubicchunks.gen.CubeGenAccess pieceAccess;
 
@@ -646,11 +749,14 @@ public final class ExtensionCubeManager {
      * placement; ores, veins, ...) for the freshly generated cube.
      *
      * <p>Model: heights are sampled with VANILLA-exact distributions against the vanilla band
-     * (no anchor scaling). Positions are then tiled downward: tile 0 is the feature's natural
-     * placement (which already reaches below -64 where vanilla's own ranges dip, e.g. diamonds
-     * to -144); tile n shifts the whole range down by n * span, with the placement count
-     * multiplied by (1 + n * oreDepthBonusPerStratum), so ore probability increases with depth.
-     * RNG is seeded per (column, cube, feature, tile) - unique per seed, never repeating.
+     * (no anchor scaling). The feature's native span is measured once per feature and cached, and
+     * that range is tiled downward by it, so the space below the band is covered continuously
+     * rather than only where vanilla's own ranges happen to dip. A vanilla pass scatters its blobs
+     * across the whole band height, so each tile's count is scaled by span/band-height to hold the
+     * per-block density at the band's, then multiplied by
+     * (1 + stratum * oreDepthBonusPerStratum) where stratum counts band heights below the band:
+     * ore probability grows with depth. RNG is seeded per (column, cube, feature, tile) - unique
+     * per seed, never repeating.
      */
     private void placeCubeFeatures(LevelChunk chunk, LevelChunkSection section, int sectionY, Holder<Biome> cubeBiome) {
         int cubeMinY = sectionY << 4;
@@ -681,43 +787,44 @@ public final class ExtensionCubeManager {
                     long featureSeed = seed + chunkPos.toLong() + sectionY * 1000003587L
                             + stepIndex * 10000019L + innerIndex * 34187003L;
 
-                    // measure the feature's vanilla Y span with a throwaway roll
-                    RandomSource measure = RandomSource.create(featureSeed ^ 0x5EEDL);
-                    Stream<BlockPos> measureStream =
-                            Stream.of(new BlockPos(chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ()));
-                    for (PlacementModifier modifier : placed.placement()) {
-                        measureStream = measureStream.flatMap(pos -> modifier.getPositions(context, measure, pos));
+                    // the feature's native span is a property of its placement chain only - measure
+                    // it once, then reuse: tiling by the native span is what keeps the per-block
+                    // density below the band equal to the band's own density
+                    if (!spanOfFeature.containsKey(placed)) {
+                        long measured = measureFeatureSpan(placed, context, chunkPos);
+                        spanOfFeature.put(placed, (int) measured);
+                        vminOfFeature.put(placed, (int) (measured >> 32));
                     }
-                    int vmin = Integer.MAX_VALUE;
-                    int vmax = Integer.MIN_VALUE;
-                    List<BlockPos> measured = measureStream.toList();
-                    for (BlockPos p : measured) {
-                        vmin = Math.min(vmin, p.getY());
-                        vmax = Math.max(vmax, p.getY());
-                    }
-                    if (measured.isEmpty() || vmax < state.minY()) {
+                    int span = spanOfFeature.get(placed);
+                    if (span == 0) {
                         innerIndex++;
                         continue;
                     }
-                    int span = Math.max(16, vmax - vmin);
+                    int vmin = vminOfFeature.get(placed);
 
-                    // tile n: the natural range translated down by n * span, count x (1 + n*bonus)
-                    int maxTile = (generator.bandMinY() - state.minY()) / span + 1;
-                    // the deepest reach of any tile must overlap this cube, else skip entirely
-                    if (vmin - maxTile * span >= cubeMaxY) {
+                    // one tile row per cube: the native range tiled downward, so the region under
+                    // the band is covered continuously rather than only where vanilla's ranges dip
+                    int tMax = Math.min(
+                            Math.floorDiv(vmin + span - cubeMinY, span),
+                            Math.floorDiv(vmin + span - state.minY(), span));
+                    int tMin = Math.max(0, Math.floorDiv(vmin - cubeMaxY, span) + 1);
+                    if (tMin > tMax) {
                         innerIndex++;
                         continue;
                     }
-                    for (int tile = 0; tile <= maxTile; tile++) {
-                        int tileBottom = vmin - tile * span;
-                        int tileTop = vmax - tile * span;
-                        if (tileBottom >= cubeMaxY || tileTop < cubeMinY || tileTop < state.minY()) {
-                            continue;
-                        }
+                    // A vanilla pass scatters its blobs over the whole band height; tiling them by
+                    // the native span would therefore multiply density by band height / span. Scale
+                    // the count back by that ratio so depth starts at band density, then grow it per
+                    // stratum below the band (oreDepthBonusPerStratum).
+                    int stratum = Math.max(0,
+                            Math.floorDiv(generator.bandMinY() - cubeMaxY, generator.stratumHeight()));
+                    double scale = (double) span / (double) generator.stratumHeight();
+                    double multiplier = scale * (1.0 + stratum * bonus);
+                    for (int tile = tMin; tile <= tMax; tile++) {
                         RandomSource rand = RandomSource.create(featureSeed ^ (tile * 0x9E3779B97F4A7C15L));
                         Stream<BlockPos> stream =
                                 Stream.of(new BlockPos(chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ()));
-                        WorldGenState.CURRENT_MULTIPLIER.set(1.0 + tile * bonus);
+                        WorldGenState.CURRENT_MULTIPLIER.set(multiplier);
                         try {
                             for (PlacementModifier modifier : placed.placement()) {
                                 stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
@@ -725,7 +832,8 @@ public final class ExtensionCubeManager {
                             final int shift = tile * span;
                             stream.filter(pos -> {
                                 int y = pos.getY() - shift;
-                                return y >= cubeMinY && y < cubeMaxY && y >= state.minY() && y < generator.bandMinY();
+                                return y >= cubeMinY && y < cubeMaxY && y >= state.minY()
+                                        && y < generator.bandMinY();
                             }).forEach(pos -> {
                                 BlockPos target = pos.offset(0, -shift, 0);
                                 try {
@@ -760,6 +868,48 @@ public final class ExtensionCubeManager {
             }
             stepIndex++;
         }
+    }
+
+    // ---------------------------------------------------------------- feature span measurement
+
+    /**
+     * Native vertical span of a height-anchored feature, measured once per feature and cached
+     * (it depends only on the feature's own placement chain). The span doubles as the tiling period,
+     * so measuring it properly - rather than reading one roll of the placement - is what keeps ore
+     * density below the band comparable to the band's own. Counts are amplified while measuring so
+     * the sampled envelope covers the distribution instead of a single draw of it.
+     * @return the native span packed into the low half with the top of the range in the high half,
+     *     or 0 when the feature places nowhere reachable
+     */
+    private long measureFeatureSpan(PlacedFeature placed, PlacementContext context, ChunkPos chunkPos) {
+        int[] bounds = {Integer.MAX_VALUE, Integer.MIN_VALUE};
+        RandomSource rand = RandomSource.create(0x5EEDF00DL);
+        Stream<BlockPos> stream = Stream.of(
+                new BlockPos(chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ()));
+        WorldGenState.CURRENT_MULTIPLIER.set(32.0);
+        try {
+            for (PlacementModifier modifier : placed.placement()) {
+                stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
+            }
+            stream.forEach(pos -> {
+                int y = pos.getY();
+                if (y < bounds[0]) {
+                    bounds[0] = y;
+                }
+                if (y > bounds[1]) {
+                    bounds[1] = y;
+                }
+            });
+        } finally {
+            WorldGenState.CURRENT_MULTIPLIER.set(1.0);
+        }
+        int vmin = bounds[0];
+        int vmax = bounds[1];
+        if (vmax < vmin || vmax < state.minY()) {
+            return 0L;
+        }
+        int span = Math.max(16, vmax - vmin);
+        return ((long) vmin << 32) | (long) span;
     }
 
     private static int lavaZoneTop() {

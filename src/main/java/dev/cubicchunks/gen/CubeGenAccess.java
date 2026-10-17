@@ -52,9 +52,10 @@ import net.minecraft.world.ticks.LevelTickAccess;
  *
  * <p>Reads delegate to the real {@link ServerLevel}. Writes only succeed inside extension cubes
  * whose sections are already generated (returning {@code false} mirrors vanilla's write-radius
- * clipping for out-of-region feature writes). The reported Y range is the vanilla band of this
- * dimension, not the extended range, because placement happens against vanilla-band anchors before
- * being stratum-shifted.
+ * clipping for out-of-region feature writes). Height sampling keeps the vanilla band of this
+ * dimension, so feature distributions are band-exact and are then stratum-shifted by the planner;
+ * the section-resolution and build-height checks features use to clip their writes deliberately
+ * use the extended range, so those writes can land below the band.
  */
 public final class CubeGenAccess implements WorldGenLevel {
 
@@ -73,6 +74,12 @@ public final class CubeGenAccess implements WorldGenLevel {
     /**
      * Height providers see the VANILLA band bounds, so placement distributions are band-exact;
      * the planner then tiles/shifts the resulting positions downward.
+     *
+     * <p>Everything else about the Y range — section resolution and the build-height checks that
+     * features use to clip their writes ({@code OreFeature} calls {@code isOutsideBuildHeight}, and
+     * {@code BulkSectionAccess} resolves the target section through {@code getSectionIndex} plus
+     * {@code getSectionsCount}) — must use the EXTENDED range of the real level, otherwise feature
+     * writes below the band are silently dropped and no ore ever appears under {@code bandMinY}.
      */
     @Override
     public int getMinBuildHeight() {
@@ -82,6 +89,54 @@ public final class CubeGenAccess implements WorldGenLevel {
     @Override
     public int getHeight() {
         return this.bandHeight;
+    }
+
+    // ------------------------------------------------------------ section/height clipping
+
+    /** Delegated to the real level: deep writes must resolve to the column's real sections. */
+    @Override
+    public int getMaxBuildHeight() {
+        return this.level.getMaxBuildHeight();
+    }
+
+    @Override
+    public int getSectionsCount() {
+        return this.level.getSectionsCount();
+    }
+
+    @Override
+    public int getMinSection() {
+        return this.level.getMinSection();
+    }
+
+    @Override
+    public int getMaxSection() {
+        return this.level.getMaxSection();
+    }
+
+    @Override
+    public int getSectionIndex(int y) {
+        return this.level.getSectionIndex(y);
+    }
+
+    @Override
+    public int getSectionIndexFromSectionY(int sectionY) {
+        return this.level.getSectionIndexFromSectionY(sectionY);
+    }
+
+    @Override
+    public int getSectionYFromSectionIndex(int sectionIndex) {
+        return this.level.getSectionYFromSectionIndex(sectionIndex);
+    }
+
+    @Override
+    public boolean isOutsideBuildHeight(int y) {
+        return this.level.isOutsideBuildHeight(y);
+    }
+
+    @Override
+    public boolean isOutsideBuildHeight(BlockPos pos) {
+        return this.level.isOutsideBuildHeight(pos);
     }
 
     // ------------------------------------------------------------ cubic interception
