@@ -83,9 +83,10 @@ public final class ExtensionGenerator {
     /** Exposes {@link NoiseChunk#getInterpolatedState()} (protected) for our cube fill loop. */
     private static final class CubeNoiseChunk extends NoiseChunk {
         CubeNoiseChunk(int cellCountXZ, RandomState randomState, int blockX, int blockZ,
-                NoiseSettings noiseSettings, NoiseGeneratorSettings genSettings, Aquifer.FluidPicker fluidPicker) {
+                NoiseSettings noiseSettings, DensityFunctions.BeardifierOrMarker beardifier,
+                NoiseGeneratorSettings genSettings, Aquifer.FluidPicker fluidPicker) {
             super(cellCountXZ, randomState, blockX, blockZ, noiseSettings,
-                    NoBeardifier.INSTANCE, genSettings, fluidPicker, Blender.empty());
+                    beardifier, genSettings, fluidPicker, Blender.empty());
         }
 
         BlockState nextBlockState() {
@@ -196,12 +197,16 @@ public final class ExtensionGenerator {
                 settings.useLegacyRandomSource());
 
         ChunkPos chunkPos = chunk.getPos();
+        // real Beardifier: terrain adaptation (beard) around deep structure pieces
+        var beardifier = net.minecraft.world.level.levelgen.Beardifier.forStructuresInChunk(
+                level.structureManager(), chunkPos);
         CubeNoiseChunk noiseChunk = new CubeNoiseChunk(
                 16 / cubeSettings.getCellWidth(),
                 randomState,
                 chunkPos.getMinBlockX(),
                 chunkPos.getMinBlockZ(),
                 cubeSettings,
+                beardifier,
                 cubeGenSettings,
                 fluidPicker);
 
@@ -352,6 +357,7 @@ public final class ExtensionGenerator {
                 chunkPos.getMinBlockX(),
                 chunkPos.getMinBlockZ(),
                 fullSettings,
+                NoBeardifier.INSTANCE,
                 fullGenSettings,
                 fluidPicker);
 
@@ -464,7 +470,12 @@ public final class ExtensionGenerator {
                 || id.equals("big_dripleaf") || id.equals("big_dripleaf_stem")
                 || id.equals("small_dripleaf") || id.equals("cave_vines")
                 || id.equals("cave_vines_plant") || id.equals("spore_blossom")
-                || id.equals("smooth_basalt") || id.equals("amethyst_block") || id.equals("calcite");
+                || id.equals("smooth_basalt") || id.equals("amethyst_block") || id.equals("calcite")
+                || id.equals("cobblestone") || id.equals("cave_air") || id.equals("spawner")
+                || id.equals("budding_amethyst") || id.equals("amethyst_cluster")
+                || id.equals("large_amethyst_bud") || id.equals("medium_amethyst_bud")
+                || id.equals("small_amethyst_bud") || id.equals("bloated_amethyst")
+                || id.equals("hollow_tuff") || id.equals("tuff") || id.equals("chest");
     }
 
     public ColumnVerifyResult verifyAllCubesAgainstFullColumn(LevelChunk chunk, it.unimi.dsi.fastutil.ints.IntSet generatedSections) {
@@ -493,6 +504,7 @@ public final class ExtensionGenerator {
                 chunkPos.getMinBlockX(),
                 chunkPos.getMinBlockZ(),
                 fullSettings,
+                NoBeardifier.INSTANCE,
                 fullGenSettings,
                 fluidPicker);
 
@@ -552,17 +564,8 @@ public final class ExtensionGenerator {
                                     continue;
                                 }
                                 String id = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(actual.getBlock()).getPath();
-                                if (id.endsWith("_ore") || actual.is(Blocks.LAVA) || actual.is(Blocks.WATER)
-                                        || id.equals("gravel") || id.equals("dirt") || id.equals("granite")
-                                        || id.equals("diorite") || id.equals("andesite") || id.equals("tuff")
-                                        || id.equals("sculk") || id.equals("sculk_vein") || id.equals("glow_lichen")
-                                        || id.equals("clay") || id.equals("moss_block") || id.equals("mossy_cobblestone")
-                                        || id.equals("dripstone_block") || id.equals("pointed_dripstone")
-                                        || id.equals("big_dripleaf") || id.equals("big_dripleaf_stem")
-                                        || id.equals("small_dripleaf") || id.equals("cave_vines")
-                                        || id.equals("cave_vines_plant") || id.equals("spore_blossom")
-                                        || id.equals("smooth_basalt") || id.equals("sculk_catalyst")
-                                        || id.equals("amethyst_block") || id.equals("calcite")) {
+                                if (isFeatureBlockId(id + "@" + sectionY) || actual.is(Blocks.LAVA)
+                                        || actual.is(Blocks.WATER)) {
                                     featureDiffs++;
                                 } else {
                                     terrainMismatches++;

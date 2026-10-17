@@ -16,7 +16,7 @@ layer on top:
 | Region | What happens | Compatibility |
 |---|---|---|
 | **Vanilla band** (e.g. `y = -64..320` for the overworld) | 100 % vanilla worldgen pipeline: density noise, surface rules, carvers, features, **structures**, **modded biomes/ores/blocks** — bit-for-bit identical to a datapack-tall world | Everything that works with a taller datapack world works |
-| **Below the band** (your configured depth) | **Extension cubes** streamed in around each player: the *actual vanilla noise machinery* evaluated at the cube's real coordinates — density caves (cheese caverns, entrances, spaghetti, pillars) keep working below the band because the band-anchored terrain gradients are re-baselined at depth, aquifers keep their shapes (deep lava pockets become water/dry caves), biomes are sampled with a climate remap onto vanilla cave biomes, and vanilla/modded features (ores, veins, springs) place through the real placement pipeline with depth-scaled anchors | Everything below is vanilla math extended downward — no custom noise; structures and heightmap-anchored surface features stay in the vanilla band |
+| **Below the band** (your configured depth) | **Extension cubes** streamed in around each player: the *actual vanilla noise machinery* evaluated at the cube's real coordinates — density caves (cheese caverns, entrances, spaghetti, pillars) keep working below the band because the band-anchored terrain gradients are re-baselined at depth, aquifers keep their shapes (deep lava pockets become water/dry caves), biomes are sampled with a climate remap onto vanilla cave biomes, and vanilla/modded features (ores, veins, springs, geodes) place through the real placement pipeline: each feature's native vertical span is measured once, then **tiled downward** over the whole deep range, with placement counts increasing per stratum (`oreDepthBonusPerStratum`) | Everything below is vanilla math extended downward — no custom noise; structures are the vanilla ones translated per stratum (see below) |
 | **Above the band** (your configured height) | Empty buildable sky (optionally extended future work) | Building, flying and mods behave normally |
 
 Columns are still the storage unit (vanilla region files), and extension cubes simply occupy the
@@ -58,10 +58,25 @@ deepBiomeRemap = true
 # No lava below y=-54; lava exists only within this many blocks above the world floor
 # (worldMinY). Set 0 for no deep lava at all.
 lavaNearFloorDepth = 32
+# Ores keep their vanilla Y ranges (they are NOT depth-scaled) and, when a range reaches
+# down to -64, that range is tiled downward through the deep world; every tiling
+# multiplies the placement count by (1 + n * oreDepthBonusPerStratum), so ore density
+# increases the deeper you go. 0 keeps ore density identical to vanilla per stratum.
+oreDepthBonusPerStratum = 0.5
+# Translate vanilla structures (ancient cities, villages, galleons, ...) into every
+# stratum below the band: each structure's pieces are NBT-copied and shifted down by
+# whole band periods, then placed through vanilla's own piece pipeline (beard/terrain
+# adaptation included).
+deepStructures = true
 
 [debug]
 # <0 disables. If >=0, pre-generates that many extension sections below spawn at startup.
 startupPregenSections = -1
+# Pregen ring radius (columns) around spawn, for startupPregenSections.
+startupPregenRadius = 0
+# On player join: teleport them to y=-96 in a cubic dimension and log how many cubes
+# streamed in (end-to-end vertical streaming test).
+autoDepthTest = false
 ```
 
 The mod works **server-side**; clients need the mod too because world height participates in chunk
@@ -72,6 +87,13 @@ decoding (bounds are synced from the server at login; a stale client config is n
 - `/cubicchunks status` — current dimension's effective range, band window, generated cube count.
 - `/cubicchunks bounds` — effective `[minY, maxY)`.
 - `/cubicchunks tp <y>` — teleport yourself vertically (great for exploring the deep world).
+- `/cubicchunks verify <y>` — diff one generated cube at `<y>` against the full-column
+  reference (vanilla noise evaluated over the whole modded range).
+- `/cubicchunks verifyall <radius>` — diff *every* generated cube in that many columns around
+  you, one column per tick; logs per-column mismatch histograms plus a bulk total. With
+  `startupPregenSections` set, run it right after boot: a clean world reports only feature-
+  placement diffs (a handful of air residue where a deep geode carved its cavity), never whole
+  cubes of air.
 
 ## Architecture (modder notes)
 
@@ -94,9 +116,33 @@ Global worldgen mixins (inspired by and credited to the C2Chunks reference imple
 
 - `YClampedGradientMixin` — re-baselines the band-anchored terrain gradients below y=-64 so
   vanilla's own cave branch (cheese caverns, entrances, spaghetti, pillars) stays active at depth.
-- `AbsoluteVerticalAnchorMixin` + `CountPlacementMixin` / `RepeatingPlacementMixin` — depth-scale
-  negative feature anchors and compensate placement counts, but only while the extension planner
-  evaluates (vanilla band decoration is untouched, staying vanilla-exact).
+- `CountPlacementMixin` / `RepeatingPlacementMixin` — while the extension planner evaluates,
+  placement counts are scaled for the current tiling; the vanilla band itself is never scaled
+  (a thread-local gate), so band decoration stays bit-for-bit vanilla. There is deliberately
+  **no vertical anchor scaling** (`AbsoluteVerticalAnchorMixin` was dropped): ores keep their
+  vanilla Y ranges.
+- Feature planning model (`core/ExtensionCubeManager.placeCubeFeatures`): per cube the planner
+  samples the vanilla-exact distribution against the *band* bounds, measures the feature's native
+  vertical span with a throwaway roll, then tiles that span downward — tile n is the same
+  placement shifted by `n * span` and gets `count * (1 + n * oreDepthBonusPerStratum)` attempts.
+  Writes are clipped to the cube window. Result: a vein whose vanilla range dips to y=-64 keeps
+  generating below the band, gets denser per stratum, and is unique per seed rather than a copy.
+- `core/DeepStructures` — translates vanilla structures into the deep world. Each piece is
+  round-tripped through its own NBT (`StructurePiece#createTag`), the `BB`/`TP`/`POS` Y
+  components are shifted by whole band periods, and **all strata are merged into one combined
+  `StructureStart` per column**, so references, Beardifier terrain adaptation and vanilla
+  `placeStructurePieces` keep working at depth. It reads only the chunk's own structure marks
+  (`ChunkAccess#getAllStarts`); asking the `StructureManager` for starts would load neighbour
+  chunks from inside STRUCTURE_STARTS and deadlock the worldgen mailbox during spawn generation.
+- Generated-cube persistence: the set of generated sections is saved as a `long[]` bitset in the
+  chunk NBT (`ChunkDataEvent` save/load), so reloading a world neither re-generates nor loses
+  deep content. Sections that vanilla carvers wrote residue into (empty deep sections filled by
+  carving) are re-generated on load instead — that residue alone is what used to leave voids
+  you fall through.
+- `gen/ExtensionGenerator#verifyAllCubesAgainstFullColumn` — the correctness oracle: one
+  full-column `NoiseChunk` evaluated over `[minY, maxY)`, diffed against every streamed cube.
+  Zero terrain mismatches (only feature-placement diffs) is the proof that per-cube noise equals
+  full-column noise.
 - `NoiseBasedAquiferMixin` + `WorldCarverMixin` — no lava below y=-54 (vanilla floods everything
   below that line with lava); lava exists only near the bottom of the modded range
   (`lavaNearFloorDepth` above `worldMinY`), so deep caves are dry/water-pockmarked and the world
@@ -107,12 +153,13 @@ Global worldgen mixins (inspired by and credited to the C2Chunks reference imple
 
 ### Deliberate limits
 
-- Structures are vanilla-band-only (they're absolute-anchored; generating them in strata would
-  produce broken carcasses anyway).
-- Surface (heightmap) features don't repeat in strata (they anchor to the surface — this is also
-  what vanilla would do with infinite depth).
-- Structures and heightmap-anchored surface features stay in the vanilla band (they are absolute-
-  or surface-anchored; repeating them would produce broken carcasses).
+- Structures DO generate in every stratum (`deepStructures`), but as *translated copies* of the
+  band's structures: a piece's biome decision stays the band's (deep-biome remap is not re-validated
+  per stratum), jigsaw junction anchors keep band-Y beard terrain, and procedurally generated
+  pieces (nether-fortress style, `runtime`) may randomise differently per cube since they are
+  re-evaluated rather than copied.
+- Surface (heightmap) features don't repeat in strata — they anchor to the surface, which is also
+  what vanilla would do with infinite depth.
 - Vanilla carvers (the older wormhole cave carvers) only run during column generation, i.e. in the
   vanilla band; deep caves come from vanilla's density-driven caves instead.
 - Feature positions are rolled per cube; ore blobs that cross a cube boundary are clipped (like

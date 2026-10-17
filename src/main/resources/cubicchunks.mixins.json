@@ -5,8 +5,8 @@
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "ServerLevelMixin",
+    "ChunkGeneratorMixin",
     "YClampedGradientMixin",
-    "AbsoluteVerticalAnchorMixin",
     "WorldGenerationContextMixin",
     "NoiseBasedAquiferMixin",
     "FluidStatusAccessor",

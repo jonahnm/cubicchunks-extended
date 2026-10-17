@@ -32,6 +32,9 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.levelgen.structure.StructurePiece;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.block.state.BlockState;
@@ -473,11 +476,61 @@ public final class ExtensionCubeManager {
         Holder<Biome> cubeBiome = section.getBiomes().get(1, 1, 1);
         placeCubeFeatures(chunk, section, sectionY, cubeBiome);
 
+        // Deep structure pieces (registered by DeepStructures) re-place themselves into the fresh
+        // section, including their interior air - terrain regen alone would fill rooms solid.
+        placeStructurePieces(chunk, sectionY);
+
         SectionPos sectionPos = SectionPos.of(chunk.getPos(), sectionY);
         // notify the light engine: new non-empty (or emptier) section
         level.getChunkSource().getLightEngine().updateSectionStatus(sectionPos, section.hasOnlyAir());
 
         markResend(chunk.getPos());
+    }
+
+    /**
+     * Re-runs structure piece placement for pieces intersecting this cube. Structure interiors
+     * place AIR explicitly, which the surgical terrain regen cannot preserve - so pieces are
+     * re-applied on top of the fresh terrain, clipped to the cube.
+     */
+    private void placeStructurePieces(LevelChunk chunk, int sectionY) {
+        if (!CubicConfig.DEEP_STRUCTURES.get()) {
+            return;
+        }
+        int cubeMinY = sectionY << 4;
+        ChunkPos chunkPos = chunk.getPos();
+        BoundingBox cubeBox = new BoundingBox(
+                chunkPos.getMinBlockX(), cubeMinY, chunkPos.getMinBlockZ(),
+                chunkPos.getMinBlockX() + 15, cubeMinY + 15, chunkPos.getMinBlockZ() + 15);
+        var structureManager = level.structureManager();
+        for (StructureStart start : structureManager.startsForStructure(chunkPos, s -> true)) {
+            for (StructurePiece piece : start.getPieces()) {
+                if (!piece.getBoundingBox().intersects(cubeBox)) {
+                    continue;
+                }
+                RandomSource rand = RandomSource.create(level.getSeed()
+                        ^ sectionY * 1000003587L ^ chunkPos.toLong()
+                        ^ System.identityHashCode(piece));
+                try {
+                    piece.postProcess(pieceAccess(chunk), structureManager, level.getChunkSource().getGenerator(),
+                            rand, cubeBox, chunkPos,
+                            new net.minecraft.core.BlockPos(chunkPos.getMinBlockX(), cubeMinY, chunkPos.getMinBlockZ()));
+                } catch (Throwable t) {
+                    if (complainedFeatureFailures.add(piece.getClass())) {
+                        CubicChunks.LOGGER.warn("[CubicChunks] deep piece placement failed (suppressing repeats): {}",
+                                t.toString());
+                    }
+                }
+            }
+        }
+    }
+
+    private dev.cubicchunks.gen.CubeGenAccess pieceAccess;
+
+    private dev.cubicchunks.gen.CubeGenAccess pieceAccess(LevelChunk chunk) {
+        if (pieceAccess == null) {
+            pieceAccess = new dev.cubicchunks.gen.CubeGenAccess(level, this, generator.bandMinY(), generator.stratumHeight());
+        }
+        return pieceAccess;
     }
 
     private void markResend(ChunkPos pos) {
@@ -572,6 +625,15 @@ public final class ExtensionCubeManager {
             return false;
         }
         chunk.getSections()[idx].setBlockState(pos.getX() & 15, pos.getY() & 15, pos.getZ() & 15, blockState, false);
+        if (blockState.hasBlockEntity()) {
+            // entity blocks (monster-room spawners, chests...) need their BlockEntity registered,
+            // otherwise they are inert after save/reload
+            var blockEntity = ((net.minecraft.world.level.block.EntityBlock) blockState.getBlock())
+                    .newBlockEntity(pos, blockState);
+            if (blockEntity != null) {
+                chunk.setBlockEntity(blockEntity);
+            }
+        }
         chunk.setUnsaved(true);
         markResend(chunk.getPos());
         return true;
@@ -581,22 +643,23 @@ public final class ExtensionCubeManager {
 
     /**
      * Places the underground features (vanilla and modded biome features with height-anchored
-     * placement; ores, veins, ...) for the freshly generated cube. Positions are produced by
-     * vanilla's own placement modifiers with depth-scaled vertical anchors, rolled per cube with
-     * a deterministic (column, cube, feature, seed) stream and filtered to the cube's Y window.
-     * Eligibility uses the cube's own (deep, remapped) biome, so no climate sampling runs here —
-     * the planner is O(placement count), not O(climate sample).
+     * placement; ores, veins, ...) for the freshly generated cube.
+     *
+     * <p>Model: heights are sampled with VANILLA-exact distributions against the vanilla band
+     * (no anchor scaling). Positions are then tiled downward: tile 0 is the feature's natural
+     * placement (which already reaches below -64 where vanilla's own ranges dip, e.g. diamonds
+     * to -144); tile n shifts the whole range down by n * span, with the placement count
+     * multiplied by (1 + n * oreDepthBonusPerStratum), so ore probability increases with depth.
+     * RNG is seeded per (column, cube, feature, tile) - unique per seed, never repeating.
      */
     private void placeCubeFeatures(LevelChunk chunk, LevelChunkSection section, int sectionY, Holder<Biome> cubeBiome) {
         int cubeMinY = sectionY << 4;
         int cubeMaxY = cubeMinY + 16;
         ChunkPos chunkPos = chunk.getPos();
-        var biomeSource = level.getChunkSource().getGenerator().getBiomeSource();
-        var sampler = level.getChunkSource().randomState().sampler();
-        CubeGenAccess access = new CubeGenAccess(level, this);
+        CubeGenAccess access = new CubeGenAccess(level, this, generator.bandMinY(), generator.stratumHeight());
         ChunkGenerator gen = level.getChunkSource().getGenerator();
         long seed = level.getSeed();
-        double factor = perCubeCountFactor();
+        double bonus = CubicConfig.ORE_DEPTH_BONUS.get();
 
         List<net.minecraft.core.HolderSet<PlacedFeature>> steps = cubeBiome.value().getGenerationSettings().features();
         int stepIndex = 0;
@@ -613,21 +676,60 @@ public final class ExtensionCubeManager {
                     innerIndex++;
                     continue;
                 }
-                RandomSource rand = RandomSource.create(
-                        seed + chunkPos.toLong() + sectionY * 1000003587L
-                                + stepIndex * 10000019L + innerIndex * 34187003L);
-                PlacementContext context = new PlacementContext(access, gen, Optional.of(placed));
-                Stream<BlockPos> stream =
-                        Stream.of(new BlockPos(chunkPos.getMinBlockX(), cubeMinY, chunkPos.getMinBlockZ()));
-                WorldGenState.CURRENT_MULTIPLIER.set(factor);
                 try {
+                    PlacementContext context = new PlacementContext(access, gen, Optional.of(placed));
+                    long featureSeed = seed + chunkPos.toLong() + sectionY * 1000003587L
+                            + stepIndex * 10000019L + innerIndex * 34187003L;
+
+                    // measure the feature's vanilla Y span with a throwaway roll
+                    RandomSource measure = RandomSource.create(featureSeed ^ 0x5EEDL);
+                    Stream<BlockPos> measureStream =
+                            Stream.of(new BlockPos(chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ()));
                     for (PlacementModifier modifier : placed.placement()) {
-                        stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
+                        measureStream = measureStream.flatMap(pos -> modifier.getPositions(context, measure, pos));
                     }
-                    stream.filter(pos -> pos.getY() >= cubeMinY && pos.getY() < cubeMaxY)
-                            .forEach(pos -> {
+                    int vmin = Integer.MAX_VALUE;
+                    int vmax = Integer.MIN_VALUE;
+                    List<BlockPos> measured = measureStream.toList();
+                    for (BlockPos p : measured) {
+                        vmin = Math.min(vmin, p.getY());
+                        vmax = Math.max(vmax, p.getY());
+                    }
+                    if (measured.isEmpty() || vmax < state.minY()) {
+                        innerIndex++;
+                        continue;
+                    }
+                    int span = Math.max(16, vmax - vmin);
+
+                    // tile n: the natural range translated down by n * span, count x (1 + n*bonus)
+                    int maxTile = (generator.bandMinY() - state.minY()) / span + 1;
+                    // the deepest reach of any tile must overlap this cube, else skip entirely
+                    if (vmin - maxTile * span >= cubeMaxY) {
+                        innerIndex++;
+                        continue;
+                    }
+                    for (int tile = 0; tile <= maxTile; tile++) {
+                        int tileBottom = vmin - tile * span;
+                        int tileTop = vmax - tile * span;
+                        if (tileBottom >= cubeMaxY || tileTop < cubeMinY || tileTop < state.minY()) {
+                            continue;
+                        }
+                        RandomSource rand = RandomSource.create(featureSeed ^ (tile * 0x9E3779B97F4A7C15L));
+                        Stream<BlockPos> stream =
+                                Stream.of(new BlockPos(chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ()));
+                        WorldGenState.CURRENT_MULTIPLIER.set(1.0 + tile * bonus);
+                        try {
+                            for (PlacementModifier modifier : placed.placement()) {
+                                stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
+                            }
+                            final int shift = tile * span;
+                            stream.filter(pos -> {
+                                int y = pos.getY() - shift;
+                                return y >= cubeMinY && y < cubeMaxY && y >= state.minY() && y < generator.bandMinY();
+                            }).forEach(pos -> {
+                                BlockPos target = pos.offset(0, -shift, 0);
                                 try {
-                                    holder.value().feature().value().place(access, gen, rand, pos);
+                                    holder.value().feature().value().place(access, gen, rand, target);
                                 } catch (Throwable t) {
                                     if (complainedFeatureFailures.add(
                                             holder.value().feature().value().getClass())) {
@@ -637,36 +739,27 @@ public final class ExtensionCubeManager {
                                     }
                                 }
                             });
+                        } catch (Throwable t) {
+                            if (complainedFeatureFailures.add(placed.getClass())) {
+                                CubicChunks.LOGGER.warn(
+                                        "[CubicChunks] deep feature planning failed (suppressing repeats): {}",
+                                        t.toString());
+                            }
+                        } finally {
+                            WorldGenState.CURRENT_MULTIPLIER.set(1.0);
+                        }
+                    }
                 } catch (Throwable t) {
                     if (complainedFeatureFailures.add(placed.getClass())) {
                         CubicChunks.LOGGER.warn(
                                 "[CubicChunks] deep feature planning failed (suppressing repeats): {}",
                                 t.toString());
                     }
-                } finally {
-                    WorldGenState.CURRENT_MULTIPLIER.set(1.0);
                 }
                 innerIndex++;
             }
             stepIndex++;
         }
-    }
-
-    /**
-     * Per-cube count multiplier. Vanilla rolls {@code N} positions per 384-block band; a cube is
-     * 16 blocks, so a straight N-per-cube roll would be 24x vanilla band density. We scale by
-     * 16/stratumHeight and then by the C2Chunks depth-compensation factor for the extended range,
-     * landing deep ore density in the vanilla-band ballpark.
-     */
-    private double perCubeCountFactor() {
-        int minY = state.minY();
-        double vertical = (double) 16 / Math.max(16, generator.stratumHeight());
-        if (minY >= -64) {
-            return vertical;
-        }
-        double extendedRange = -64.0 - minY;
-        double depthFactor = (320.0 + 4.0 * extendedRange) / 320.0;
-        return vertical * depthFactor;
     }
 
     private static int lavaZoneTop() {

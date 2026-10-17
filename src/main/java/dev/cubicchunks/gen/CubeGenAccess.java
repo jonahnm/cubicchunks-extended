@@ -60,10 +60,28 @@ public final class CubeGenAccess implements WorldGenLevel {
 
     private final ServerLevel level;
     private final ExtensionCubeManager manager;
+    private final int bandMinY;
+    private final int bandHeight;
 
-    public CubeGenAccess(ServerLevel level, ExtensionCubeManager manager) {
+    public CubeGenAccess(ServerLevel level, ExtensionCubeManager manager, int bandMinY, int bandHeight) {
         this.level = level;
         this.manager = manager;
+        this.bandMinY = bandMinY;
+        this.bandHeight = bandHeight;
+    }
+
+    /**
+     * Height providers see the VANILLA band bounds, so placement distributions are band-exact;
+     * the planner then tiles/shifts the resulting positions downward.
+     */
+    @Override
+    public int getMinBuildHeight() {
+        return this.bandMinY;
+    }
+
+    @Override
+    public int getHeight() {
+        return this.bandHeight;
     }
 
     // ------------------------------------------------------------ cubic interception
@@ -81,20 +99,6 @@ public final class CubeGenAccess implements WorldGenLevel {
     @Override
     public void setCurrentlyGenerating(@Nullable Supplier<String> name) {
         // no-op
-    }
-
-    /**
-     * Placement modifiers see the level's true (extended) Y bounds, so the depth-scaled vertical
-     * anchors engage and features distribute across the whole extension range.
-     */
-    @Override
-    public int getMinBuildHeight() {
-        return this.level.getMinBuildHeight();
-    }
-
-    @Override
-    public int getHeight() {
-        return this.level.getHeight();
     }
 
     // Disallowed mutation primitives: stratum features never remove blocks.

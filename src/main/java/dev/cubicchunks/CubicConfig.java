@@ -31,6 +31,8 @@ public final class CubicConfig {
     public static final ModConfigSpec.BooleanValue DEEP_BEDROCK_FLOOR;
     public static final ModConfigSpec.BooleanValue REMAP_DEEP_BIOMES;
     public static final ModConfigSpec.IntValue LAVA_NEAR_FLOOR_DEPTH;
+    public static final ModConfigSpec.DoubleValue ORE_DEPTH_BONUS;
+    public static final ModConfigSpec.BooleanValue DEEP_STRUCTURES;
 
     public static final ModConfigSpec.IntValue DEBUG_PREGEN_SECTIONS;
     public static final ModConfigSpec.IntValue DEBUG_PREGEN_RADIUS;
@@ -95,6 +97,14 @@ public final class CubicConfig {
         b.comment("No lava below y=-54; lava exists only within this many blocks above the world",
                 "floor (worldMinY). Set 0 for no deep lava at all.");
         LAVA_NEAR_FLOOR_DEPTH = b.defineInRange("lavaNearFloorDepth", 32, 0, 1000000);
+        b.comment("Ore probability multiplier increase per ore-range tiling below the vanilla",
+                "band. Ores continue naturally below -64 (vanilla ranges already dip below it),",
+                "then tile downward; each tiling multiplies placement count by 1 + n * this.");
+        ORE_DEPTH_BONUS = b.defineInRange("oreDepthBonusPerStratum", 0.5, 0.0, 16.0);
+        b.comment("Generate vanilla structures (ancient cities, villages, ...) in every stratum",
+                "below the vanilla band: each structure's pieces are translated down per stratum,",
+                "with vanilla terrain adaptation (beard) applied by the noise generator.");
+        DEEP_STRUCTURES = b.define("deepStructures", true);
         b.pop();
 
         b.comment("Development aids; not for release worlds.").push("debug");
