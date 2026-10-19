@@ -82,7 +82,7 @@ public final class CubeGenAccess implements WorldGenLevel {
      * writes below the band are silently dropped and no ore ever appears under {@code bandMinY}.
      */
     @Override
-    public int getMinBuildHeight() {
+    public int getMinY() {
         return this.bandMinY;
     }
 
@@ -95,8 +95,8 @@ public final class CubeGenAccess implements WorldGenLevel {
 
     /** Delegated to the real level: deep writes must resolve to the column's real sections. */
     @Override
-    public int getMaxBuildHeight() {
-        return this.level.getMaxBuildHeight();
+    public int getMaxY() {
+        return this.level.getMaxY();
     }
 
     @Override
@@ -105,13 +105,13 @@ public final class CubeGenAccess implements WorldGenLevel {
     }
 
     @Override
-    public int getMinSection() {
-        return this.level.getMinSection();
+    public int getMinSectionY() {
+        return this.level.getMinSectionY();
     }
 
     @Override
-    public int getMaxSection() {
-        return this.level.getMaxSection();
+    public int getMaxSectionY() {
+        return this.level.getMaxSectionY();
     }
 
     @Override
@@ -184,10 +184,16 @@ public final class CubeGenAccess implements WorldGenLevel {
         return this.level.getChunkSource();
     }
 
+    /**
+     * Passes {@code requireChunk} through unchanged. Optional lookups stay non-loading (that is what
+     * keeps feature writes from pulling neighbour columns into the tick loop), but required lookups
+     * must really return a chunk: 26.x's {@code BulkSectionAccess} (now used by OreFeature) derefs
+     * the result of {@code getChunk(x, z)} without a null check.
+     */
     @Nullable
     @Override
     public ChunkAccess getChunk(int x, int z, ChunkStatus status, boolean requireChunk) {
-        return this.level.getChunk(x, z, status, false);
+        return this.level.getChunk(x, z, status, requireChunk);
     }
 
     @Override
@@ -298,8 +304,8 @@ public final class CubeGenAccess implements WorldGenLevel {
     }
 
     @Override
-    public float getShade(Direction direction, boolean shaded) {
-        return this.level.getShade(direction, shaded);
+    public net.minecraft.world.attribute.EnvironmentAttributeReader environmentAttributes() {
+        return this.level.environmentAttributes();
     }
 
     @Override
@@ -310,11 +316,6 @@ public final class CubeGenAccess implements WorldGenLevel {
     @Override
     public WorldBorder getWorldBorder() {
         return this.level.getWorldBorder();
-    }
-
-    @Override
-    public int getBlockTint(BlockPos pos, ColorResolver resolver) {
-        return this.level.getBlockTint(pos, resolver);
     }
 
     @Override
@@ -358,23 +359,18 @@ public final class CubeGenAccess implements WorldGenLevel {
     }
 
     @Override
-    public long dayTime() {
-        return this.level.dayTime();
-    }
-
-    @Override
     public void addParticle(net.minecraft.core.particles.ParticleOptions particle, double x, double y, double z, double vx, double vy, double vz) {
         // worldgen particles are not emitted
     }
 
     @Override
-    public void levelEvent(@Nullable Player player, int event, BlockPos pos, int data) {
-        this.level.levelEvent(player, event, pos, data);
+    public void levelEvent(@Nullable Entity source, int event, BlockPos pos, int data) {
+        this.level.levelEvent(source, event, pos, data);
     }
 
     @Override
-    public void playSound(@Nullable Player player, BlockPos pos, SoundEvent sound, SoundSource source, float volume, float pitch) {
-        this.level.playSound(player, pos, sound, source, volume, pitch);
+    public void playSound(@Nullable Entity except, BlockPos pos, SoundEvent sound, SoundSource source, float volume, float pitch) {
+        this.level.playSound(except, pos, sound, source, volume, pitch);
     }
 
     @Override

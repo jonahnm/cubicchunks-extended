@@ -27,6 +27,7 @@ public abstract class ChunkGeneratorMixin {
             StructureManager structureManager,
             ChunkAccess chunk,
             StructureTemplateManager templateManager,
+            net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> levelKey,
             CallbackInfo ci) {
         if (!CubicConfig.DEEP_STRUCTURES.get() || CubicConfig.extensionMinY() == null) {
             return;

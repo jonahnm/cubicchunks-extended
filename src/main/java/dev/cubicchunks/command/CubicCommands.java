@@ -19,7 +19,7 @@ public final class CubicCommands {
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(Commands.literal("cubicchunks")
-                .requires(source -> source.hasPermission(2))
+                .requires(net.minecraft.commands.Commands.hasPermission(net.minecraft.commands.Commands.LEVEL_GAMEMASTERS))
                 .then(Commands.literal("status")
                         .executes(ctx -> status(ctx.getSource())))
                 .then(Commands.literal("tp")
@@ -44,13 +44,13 @@ public final class CubicCommands {
         ServerLevel level = source.getLevel();
         ExtensionCubeManager manager = CubicChunks.managerFor(level);
         if (manager == null) {
-            source.sendFailure(Component.literal("Dimension " + level.dimension().location() + " is not cubic-enabled."));
+            source.sendFailure(Component.literal("Dimension " + level.dimension().identifier() + " is not cubic-enabled."));
             return 0;
         }
         CubicConfig.CubicLevelState state = manager.state();
         source.sendSuccess(() -> Component.literal(String.format(
                 "Cubic dimension %s: range [%d, %d) (%d sections); vanilla band [%d, %d); generated extension cubes: %d",
-                level.dimension().location(), state.minY(), state.maxY(), state.sectionsCount(),
+                level.dimension().identifier(), state.minY(), state.maxY(), state.sectionsCount(),
                 manager.generator().bandMinY(), manager.generator().bandMaxY(),
                 manager.generatedCount())), false);
         return 1;
@@ -60,7 +60,7 @@ public final class CubicCommands {
         ServerLevel level = source.getLevel();
         source.sendSuccess(() -> Component.literal(String.format(
                 "Effective Y range in %s: [%d, %d)",
-                level.dimension().location(), level.getMinBuildHeight(), level.getMaxBuildHeight())), false);
+                level.dimension().identifier(), level.getMinY(), level.getMaxY() + 1)), false);
         return 1;
     }
 
@@ -73,13 +73,13 @@ public final class CubicCommands {
         ServerLevel level = source.getLevel();
         dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);
         if (manager == null) {
-            source.sendFailure(Component.literal("Dimension " + level.dimension().location()
+            source.sendFailure(Component.literal("Dimension " + level.dimension().identifier()
                     + " is not cubic-enabled."));
             return 0;
         }
         var center = source.getPlayer() != null
                 ? source.getPlayer().chunkPosition()
-                : new net.minecraft.world.level.ChunkPos(level.getSharedSpawnPos());
+                : net.minecraft.world.level.ChunkPos.containing(level.getRespawnData().pos());
         long startNanos = System.nanoTime();
         int rebuilt = manager.regenerateGeneratedCubes(center, radius);
         long tookMs = (System.nanoTime() - startNanos) / 1_000_000L;
@@ -92,12 +92,12 @@ public final class CubicCommands {
         ServerLevel level = source.getLevel();
         dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);
         if (manager == null) {
-            source.sendFailure(Component.literal("Dimension " + level.dimension().location() + " is not cubic-enabled."));
+            source.sendFailure(Component.literal("Dimension " + level.dimension().identifier() + " is not cubic-enabled."));
             return 0;
         }
         var center = source.getPlayer() != null
                 ? source.getPlayer().chunkPosition()
-                : new net.minecraft.world.level.ChunkPos(level.getSharedSpawnPos());
+                : net.minecraft.world.level.ChunkPos.containing(level.getRespawnData().pos());
         manager.startVerifyAll(radius, center);
         source.sendSuccess(() -> Component.literal(
                 "[CubicChunks] bulk verification started across " + (2 * radius + 1) * (2 * radius + 1)
@@ -109,14 +109,14 @@ public final class CubicCommands {
         ServerLevel level = source.getLevel();
         dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);
         if (manager == null) {
-            source.sendFailure(Component.literal("Dimension " + level.dimension().location() + " is not cubic-enabled."));
+            source.sendFailure(Component.literal("Dimension " + level.dimension().identifier() + " is not cubic-enabled."));
             return 0;
         }
         var pos = source.getPlayer() != null
                 ? source.getPlayer().chunkPosition()
-                : new net.minecraft.world.level.ChunkPos(level.getSharedSpawnPos());
+                : net.minecraft.world.level.ChunkPos.containing(level.getRespawnData().pos());
         boolean generated = manager.debugEnsureCube(pos, y);
-        var chunk = level.getChunkSource().getChunkNow(pos.x, pos.z);
+        var chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
         if (chunk == null) {
             source.sendFailure(Component.literal("Column not loaded yet; move around and retry."));
             return 0;
@@ -131,8 +131,9 @@ public final class CubicCommands {
     private static int teleport(CommandSourceStack source, int y) throws CommandSyntaxException {
         ServerPlayer player = source.getPlayerOrException();
         ServerLevel level = source.getLevel();
-        int clamped = Math.max(level.getMinBuildHeight() + 2, Math.min(level.getMaxBuildHeight() - 2, y));
-        player.teleportTo(level, player.getX(), clamped, player.getZ(), player.getYRot(), player.getXRot());
+        int clamped = Math.max(level.getMinY() + 2, Math.min(level.getMaxY() - 1, y));
+        player.teleportTo(level, player.getX(), clamped, player.getZ(),
+                java.util.EnumSet.noneOf(net.minecraft.world.entity.Relative.class), player.getYRot(), player.getXRot(), false);
         source.sendSuccess(() -> Component.literal("Teleported to y=" + clamped), false);
         return 1;
     }

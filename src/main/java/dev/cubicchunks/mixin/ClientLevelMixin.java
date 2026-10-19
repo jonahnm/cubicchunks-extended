@@ -31,7 +31,7 @@ public abstract class ClientLevelMixin implements CubicLevelBounds {
      */
     @org.spongepowered.asm.mixin.Unique
     private CubicSyncState.Bounds cubicchunks$boundsOrNull() {
-        CubicSyncState.Bounds b = CubicSyncState.get(((Level) (Object) this).dimension().location());
+        CubicSyncState.Bounds b = CubicSyncState.get(((Level) (Object) this).dimension().identifier());
         if (b != null) {
             return b;
         }
@@ -51,8 +51,8 @@ public abstract class ClientLevelMixin implements CubicLevelBounds {
         return b == null ? Integer.MIN_VALUE : b.maxY();
     }
 
-    /** Class-level override of the {@code LevelReader} interface default. */
-    public int getMinBuildHeight() {
+    /** Class-level override of the {@code LevelHeightAccessor} interface default. */
+    public int getMinY() {
         CubicSyncState.Bounds b = cubicchunks$boundsOrNull();
         return b == null ? cubicchunks$vanillaType().minY() : b.minY();
     }

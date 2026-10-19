@@ -8,7 +8,7 @@ import net.minecraft.core.SectionPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.StructureManager;
@@ -85,10 +85,10 @@ public final class DeepStructures {
         try {
             CompoundTag tag = piece.createTag(holder.context());
             shiftTagY(tag, shift);
-            String id = tag.getString("id").toLowerCase(java.util.Locale.ROOT);
-            ResourceLocation rl = ResourceLocation.parse(id);
+            String id = tag.getString("id").map(s -> s.toLowerCase(java.util.Locale.ROOT)).orElse("");
+            Identifier rl = Identifier.parse(id);
             rl = rename(rl);
-            var type = BuiltInRegistries.STRUCTURE_PIECE.get(rl);
+            var type = BuiltInRegistries.STRUCTURE_PIECE.getValue(rl);
             if (type == null) {
                 return null;
             }
@@ -100,18 +100,18 @@ public final class DeepStructures {
         }
     }
 
-    private static ResourceLocation rename(ResourceLocation rl) {
+    private static Identifier rename(Identifier rl) {
         // replicate PiecesContainer's legacy renames
         return switch (rl.getPath()) {
-            case "nvi", "pcp", "bastionremnant", "runtime" -> ResourceLocation.withDefaultNamespace("jigsaw");
+            case "nvi", "pcp", "bastionremnant", "runtime" -> Identifier.withDefaultNamespace("jigsaw");
             default -> rl;
         };
     }
 
     /** Shifts the Y components of the piece's "BB" (int array of 6) and "TP"/"POS" pivots. */
     private static void shiftTagY(CompoundTag tag, int shift) {
-        if (tag.contains("BB", Tag.TAG_INT_ARRAY)) {
-            int[] bb = tag.getIntArray("BB");
+        int[] bb = tag.getIntArray("BB").orElse(null);
+        if (bb != null) {
             if (bb.length >= 6) {
                 bb[1] += shift;
                 bb[4] += shift;
@@ -119,8 +119,8 @@ public final class DeepStructures {
             }
         }
         for (String key : new String[] {"TP", "POS"}) {
-            if (tag.contains(key, Tag.TAG_INT_ARRAY)) {
-                int[] piv = tag.getIntArray(key);
+            int[] piv = tag.getIntArray(key).orElse(null);
+            if (piv != null) {
                 if (piv.length >= 3) {
                     piv[1] += shift;
                     tag.putIntArray(key, piv);

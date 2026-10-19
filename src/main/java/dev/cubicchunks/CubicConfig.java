@@ -3,10 +3,10 @@ package dev.cubicchunks;
 import java.util.List;
 import java.util.Locale;
 
-import net.minecraft.ResourceLocationException;
+import net.minecraft.IdentifierException;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.Level;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
@@ -122,9 +122,9 @@ public final class CubicConfig {
 
     private static boolean isValidDimId(String s) {
         try {
-            ResourceLocation.parse(s);
+            Identifier.parse(s);
             return true;
-        } catch (ResourceLocationException e) {
+        } catch (IdentifierException e) {
             return false;
         }
     }
@@ -135,7 +135,7 @@ public final class CubicConfig {
      */
     public static CubicLevelState stateFor(ResourceKey<Level> dimension) {
         List<? extends String> list = ENABLED_DIMENSIONS.get();
-        if (list == null || !list.contains(dimension.location().toString())) {
+        if (list == null || !list.contains(dimension.identifier().toString())) {
             return null;
         }
         return stateUnchecked();

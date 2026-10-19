@@ -23,7 +23,7 @@ public abstract class WorldGenerationContextMixin {
 
     @Inject(method = "<init>", at = @At("RETURN"))
     private void cubicchunks$useAccessor(ChunkGenerator generator, LevelHeightAccessor accessor, CallbackInfo ci) {
-        this.minY = accessor.getMinBuildHeight();
+        this.minY = accessor.getMinY();
         this.height = accessor.getHeight();
     }
 }

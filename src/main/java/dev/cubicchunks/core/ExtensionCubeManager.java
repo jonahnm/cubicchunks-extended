@@ -17,6 +17,8 @@ import dev.cubicchunks.CubicConfig;
 import dev.cubicchunks.gen.CubeGenAccess;
 import dev.cubicchunks.gen.ExtensionGenerator;
 import dev.cubicchunks.worldgen.WorldGenState;
+import dev.cubicchunks.CubicAttachments;
+import dev.cubicchunks.worldgen.GeneratedSectionsData;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
@@ -25,7 +27,7 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ChunkTrackingView;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -63,6 +65,8 @@ public final class ExtensionCubeManager {
 
     /** Cubes generated this session (avoids re-noising restored-from-disk sections). */
     private final LongOpenHashSet generated = new LongOpenHashSet();
+    /** Columns whose persisted generated-marker has been merged into {@link #generated}. */
+    private final Set<ChunkPos> importedColumns = new HashSet<>();
     /** Columns that need a full re-send (extension cubes changed after initial packet). */
     private final Set<ChunkPos> resendQueue = new HashSet<>();
 
@@ -96,7 +100,7 @@ public final class ExtensionCubeManager {
         java.util.List<ChunkPos> columns = new java.util.ArrayList<>();
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
-                columns.add(new ChunkPos(center.x + dx, center.z + dz));
+                columns.add(new ChunkPos(center.x() + dx, center.z() + dz));
             }
         }
         this.verifyQueue = columns.iterator();
@@ -121,11 +125,12 @@ public final class ExtensionCubeManager {
             return;
         }
         ChunkPos cp = verifyQueue.next();
-        LevelChunk chunk = (LevelChunk) level.getChunk(cp.x, cp.z,
+        LevelChunk chunk = (LevelChunk) level.getChunk(cp.x(), cp.z(),
                 net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true);
+        ensureColumnImported(cp, chunk);
         it.unimi.dsi.fastutil.ints.IntOpenHashSet sections = new it.unimi.dsi.fastutil.ints.IntOpenHashSet();
         for (int sy = generator.bandMinSection() - 1; sy >= state.minSection(); sy--) {
-            if (generated.contains(SectionPos.asLong(cp.x, sy, cp.z))) {
+            if (generated.contains(SectionPos.asLong(cp.x(), sy, cp.z()))) {
                 sections.add(sy);
             }
         }
@@ -135,7 +140,7 @@ public final class ExtensionCubeManager {
         verifyBlocks += result.blocks();
         verifyFeatureDiffs += result.featureDiffs();
         verifyTerrainMismatches += result.terrainMismatches();
-        CubicChunks.LOGGER.info("[CubicChunks] verify column [{}, {}]: {}", cp.x, cp.z, result.summary());
+        CubicChunks.LOGGER.info("[CubicChunks] verify column [{}, {}]: {}", cp.x(), cp.z(), result.summary());
     }
 
     public ExtensionCubeManager(ServerLevel level, CubicConfig.CubicLevelState state) {
@@ -165,12 +170,40 @@ public final class ExtensionCubeManager {
      * cubes are skipped by the streamer so player modifications survive restarts; unmarked deep
      * sections (carver residue, or worlds made before this marker existed) are regenerated.
      */
+    /**
+     * Merges a column's persisted generated-marker (chunk data attachment) into the session set,
+     * once per column per session. Columns with no marker (older saves) fall back to the
+     * "already looks like finished deep terrain" heuristic so player builds are not re-noised.
+     */
+    private void ensureColumnImported(ChunkPos pos, LevelChunk chunk) {
+        if (!importedColumns.add(pos)) {
+            return;
+        }
+        GeneratedSectionsData existing = chunk.getExistingDataOrNull(CubicAttachments.GENERATED_SECTIONS);
+        if (existing != null && existing.bits().length > 0) {
+            applyGeneratedBitset(pos, existing.bits());
+        } else {
+            markLikelyGeneratedFromChunk(pos, chunk);
+        }
+        persistGeneratedMarker(pos, chunk);
+    }
+
+    /** Writes the column's marker back onto the chunk so the chunk serializer persists it. */
+    private void persistGeneratedMarker(ChunkPos pos, LevelChunk chunk) {
+        long[] bits = generatedBitsetFor(pos);
+        if (bits == null) {
+            return;
+        }
+        chunk.getData(CubicAttachments.GENERATED_SECTIONS).setBits(bits);
+        chunk.markUnsaved();
+    }
+
     public long[] generatedBitsetFor(ChunkPos pos) {
         int sections = state.sectionsCount();
         long[] bits = new long[(sections + 63) >> 6];
         boolean any = false;
         for (int i = 0; i < sections; i++) {
-            if (generated.contains(SectionPos.asLong(pos.x, state.minSection() + i, pos.z))) {
+            if (generated.contains(SectionPos.asLong(pos.x(), state.minSection() + i, pos.z()))) {
                 bits[i >> 6] |= 1L << (i & 63);
                 any = true;
             }
@@ -183,7 +216,7 @@ public final class ExtensionCubeManager {
         int sections = Math.min(state.sectionsCount(), bits.length << 6);
         for (int i = 0; i < sections; i++) {
             if ((bits[i >> 6] & (1L << (i & 63))) != 0) {
-                generated.add(SectionPos.asLong(pos.x, state.minSection() + i, pos.z));
+                generated.add(SectionPos.asLong(pos.x(), state.minSection() + i, pos.z()));
             }
         }
     }
@@ -195,7 +228,7 @@ public final class ExtensionCubeManager {
      */
     public void markLikelyGeneratedFromChunk(ChunkPos pos, LevelChunk chunk) {
         for (int sy = generator.bandMinSection() - 1; sy >= state.minSection(); sy--) {
-            long key = SectionPos.asLong(pos.x, sy, pos.z);
+            long key = SectionPos.asLong(pos.x(), sy, pos.z());
             if (generated.contains(key)) {
                 continue;
             }
@@ -235,7 +268,7 @@ public final class ExtensionCubeManager {
         if (sy >= generator.bandMinSection() || sy < state.minSection()) {
             return false;
         }
-        return considerCube(SectionPos.asLong(colPos.x, sy, colPos.z));
+        return considerCube(SectionPos.asLong(colPos.x(), sy, colPos.z()));
     }
 
     /**
@@ -253,7 +286,7 @@ public final class ExtensionCubeManager {
         for (long key : keys) {
             int cx = SectionPos.x(key);
             int cz = SectionPos.z(key);
-            if (radius >= 0 && Math.max(Math.abs(cx - center.x), Math.abs(cz - center.z)) > radius) {
+            if (radius >= 0 && Math.max(Math.abs(cx - center.x()), Math.abs(cz - center.z())) > radius) {
                 continue;
             }
             int sy = SectionPos.y(key);
@@ -261,6 +294,7 @@ public final class ExtensionCubeManager {
             if (chunk == null) {
                 continue;
             }
+            ensureColumnImported(chunk.getPos(), chunk);
             int idx = chunk.getSectionIndexFromSectionY(sy);
             LevelChunkSection[] sections = chunk.getSections();
             if (idx < 0 || idx >= sections.length) {
@@ -274,17 +308,18 @@ public final class ExtensionCubeManager {
 
     /** Test aid: synchronously generate {@code depth} extension cubes below spawn (ring of columns). */
     public void debugPregenAroundSpawn(int depth, int radius) {
-        ChunkPos spawn = new ChunkPos(level.getSharedSpawnPos());
+        ChunkPos spawn = ChunkPos.containing(level.getRespawnData().pos());
         int zoneTop = generator.bandMinSection() - 1;
         int done = 0;
         long startNanos = System.nanoTime();
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
-                ChunkPos colPos = new ChunkPos(spawn.x + dx, spawn.z + dz);
-                LevelChunk chunk = (LevelChunk) level.getChunk(colPos.x, colPos.z,
+                ChunkPos colPos = new ChunkPos(spawn.x() + dx, spawn.z() + dz);
+                LevelChunk chunk = (LevelChunk) level.getChunk(colPos.x(), colPos.z(),
                         net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true);
+                ensureColumnImported(colPos, chunk);
                 for (int sy = zoneTop; sy > zoneTop - depth && sy >= state.minSection(); sy--) {
-                    long key = SectionPos.asLong(colPos.x, sy, colPos.z);
+                    long key = SectionPos.asLong(colPos.x(), sy, colPos.z());
                     if (generated.contains(key)) {
                         continue;
                     }
@@ -311,7 +346,8 @@ public final class ExtensionCubeManager {
      * column (verifies that vanilla density caves actually carved the deep world).
      */
     public void debugReportCubeComposition(ChunkPos pos) {
-        LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x, pos.z);
+        LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
+        ensureColumnImported(pos, chunk);
         if (chunk == null) {
             return;
         }
@@ -320,7 +356,7 @@ public final class ExtensionCubeManager {
         int[] cubes = new int[2];
         int nearFloorStart = state.minSection() + CubicConfig.LAVA_NEAR_FLOOR_DEPTH.get() / 16 + 1;
         for (int sy = generator.bandMinSection() - 1; sy >= state.minSection(); sy--) {
-            long key = SectionPos.asLong(pos.x, sy, pos.z);
+            long key = SectionPos.asLong(pos.x(), sy, pos.z());
             if (!generated.contains(key)) {
                 continue;
             }
@@ -373,8 +409,8 @@ public final class ExtensionCubeManager {
     private final java.util.ArrayDeque<Long> workQueue = new java.util.ArrayDeque<>();
 
     private static double distanceSq(ChunkPos center, ChunkPos other) {
-        long dx = (long) other.x - center.x;
-        long dz = (long) other.z - center.z;
+        long dx = (long) other.x() - center.x();
+        long dz = (long) other.z() - center.z();
         return dx * dx + dz * dz;
     }
 
@@ -433,12 +469,12 @@ public final class ExtensionCubeManager {
                 for (int dy = 0; dy <= belowDistF + vertF; dy++) {
                     int below = eyeF - dy;
                     if (below >= yMinF && below <= yMaxF) {
-                        workQueue.addLast(SectionPos.asLong(colPos.x, below, colPos.z));
+                        workQueue.addLast(SectionPos.asLong(colPos.x(), below, colPos.z()));
                     }
                     if (dy > 0 && dy <= vertF) {
                         int above = eyeF + dy;
                         if (above >= yMinF && above <= yMaxF) {
-                            workQueue.addLast(SectionPos.asLong(colPos.x, above, colPos.z));
+                            workQueue.addLast(SectionPos.asLong(colPos.x(), above, colPos.z()));
                         }
                     }
                 }
@@ -461,6 +497,10 @@ public final class ExtensionCubeManager {
         LevelChunk chunk = level.getChunkSource().getChunkNow(cx, cz);
         if (chunk == null) {
             return false; // column not loaded yet; retried next scan
+        }
+        ensureColumnImported(chunk.getPos(), chunk);
+        if (generated.contains(cubeKey)) {
+            return false; // the restored marker says: already generated
         }
         int idx = chunk.getSectionIndexFromSectionY(sy);
         LevelChunkSection[] sections = chunk.getSections();
@@ -518,7 +558,7 @@ public final class ExtensionCubeManager {
             }
         }
         chunk.getSections()[idx] = section;
-        chunk.setUnsaved(true);
+        chunk.markUnsaved();
 
         // Features always run: the cube's own (deep, remapped) biome drives its feature set.
         Holder<Biome> cubeBiome = section.getBiomes().get(1, 1, 1);
@@ -533,6 +573,7 @@ public final class ExtensionCubeManager {
         level.getChunkSource().getLightEngine().updateSectionStatus(sectionPos, section.hasOnlyAir());
 
         markResend(chunk.getPos());
+        persistGeneratedMarker(chunk.getPos(), chunk);
     }
 
     /**
@@ -564,7 +605,7 @@ public final class ExtensionCubeManager {
                 continue;
             }
             RandomSource rand = RandomSource.create(level.getSeed()
-                    ^ sectionY * 1000003587L ^ chunkPos.toLong()
+                    ^ sectionY * 1000003587L ^ chunkPos.pack()
                     ^ System.identityHashCode(piece));
             try {
                 piece.postProcess(pieceAccess(chunk), structureManager, level.getChunkSource().getGenerator(),
@@ -582,7 +623,7 @@ public final class ExtensionCubeManager {
     /** Section Y -> pieces, built from the starts of this and any already-loaded neighbour column. */
     private Map<Integer, java.util.List<StructurePiece>> pieceIndexForColumn(LevelChunk chunk) {
         ChunkPos origin = chunk.getPos();
-        long columnKey = origin.toLong();
+        long columnKey = origin.pack();
         if (indexedColumn == columnKey) {
             return pieceIndex;
         }
@@ -591,7 +632,7 @@ public final class ExtensionCubeManager {
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
                 // loaded columns only: never trigger a chunk load from the tick loop
-                LevelChunk col = level.getChunkSource().getChunkNow(origin.x + dx, origin.z + dz);
+                LevelChunk col = level.getChunkSource().getChunkNow(origin.x() + dx, origin.z() + dz);
                 if (col == null) {
                     continue;
                 }
@@ -662,7 +703,7 @@ public final class ExtensionCubeManager {
             if (belowCube < state.minSection()) {
                 continue;
             }
-            long key = SectionPos.asLong(player.chunkPosition().x, belowCube, player.chunkPosition().z);
+            long key = SectionPos.asLong(player.chunkPosition().x(), belowCube, player.chunkPosition().z());
             if (!generated.contains(key)) {
                 considerCube(key);
             }
@@ -680,7 +721,7 @@ public final class ExtensionCubeManager {
         while (it.hasNext() && budget > 0) {
             ChunkPos cp = it.next();
             it.remove();
-            LevelChunk chunk = level.getChunkSource().getChunkNow(cp.x, cp.z);
+            LevelChunk chunk = level.getChunkSource().getChunkNow(cp.x(), cp.z());
             if (chunk == null) {
                 continue;
             }
@@ -707,7 +748,18 @@ public final class ExtensionCubeManager {
         }
         int cubeY = pos.getY() >> 4;
         long cubeKey = SectionPos.asLong(pos.getX() >> 4, cubeY, pos.getZ() >> 4);
-        return generated.contains(cubeKey);
+        if (!generated.contains(cubeKey)) {
+            return false;
+        }
+        // 26.x places ore blobs straight into the section it acquires (BulkSectionAccess), so the
+        // write never passes through setBlock: flag the owning column here, or the feature blocks
+        // would neither be saved nor re-sent to clients.
+        LevelChunk target = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+        if (target != null) {
+            target.markUnsaved();
+            markResend(target.getPos());
+        }
+        return true;
     }
 
     public boolean cubeSetBlockFromFeature(BlockPos pos, net.minecraft.world.level.block.state.BlockState blockState) {
@@ -737,7 +789,7 @@ public final class ExtensionCubeManager {
                 chunk.setBlockEntity(blockEntity);
             }
         }
-        chunk.setUnsaved(true);
+        chunk.markUnsaved();
         markResend(chunk.getPos());
         return true;
     }
@@ -784,7 +836,7 @@ public final class ExtensionCubeManager {
                 }
                 try {
                     PlacementContext context = new PlacementContext(access, gen, Optional.of(placed));
-                    long featureSeed = seed + chunkPos.toLong() + sectionY * 1000003587L
+                    long featureSeed = seed + chunkPos.pack() + sectionY * 1000003587L
                             + stepIndex * 10000019L + innerIndex * 34187003L;
 
                     // the feature's native span is a property of its placement chain only - measure
@@ -919,7 +971,7 @@ public final class ExtensionCubeManager {
 
     private static boolean isLavaSpring(Holder<PlacedFeature> holder) {
         return holder.unwrapKey()
-                .map(k -> k.location().equals(net.minecraft.resources.ResourceLocation.withDefaultNamespace("spring_lava")))
+                .map(k -> k.identifier().equals(net.minecraft.resources.Identifier.withDefaultNamespace("spring_lava")))
                 .orElse(false);
     }
 

@@ -58,8 +58,8 @@ public abstract class ServerLevelMixin implements CubicLevelBounds {
         return ((Level) (Object) this).dimensionType();
     }
 
-    /** Class-level override of the {@code LevelReader} interface default. */
-    public int getMinBuildHeight() {
+    /** Class-level override of the {@code LevelHeightAccessor} interface default. */
+    public int getMinY() {
         return cubicchunks$resolve() ? cubicchunks$minY : cubicchunks$vanillaType().minY();
     }
 

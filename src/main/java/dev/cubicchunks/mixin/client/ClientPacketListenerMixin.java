@@ -26,8 +26,8 @@ public abstract class ClientPacketListenerMixin {
             var level = Minecraft.getInstance().level;
             CubicChunks.LOGGER.info(
                     "[CubicChunks] first client chunk: dim={} bounds=[{}, {}) sections={}",
-                    level.dimension().location(),
-                    level.getMinBuildHeight(), level.getMaxBuildHeight(),
+                    level.dimension().identifier(),
+                    level.getMinY(), level.getMaxY() + 1,
                     level.getSectionsCount());
         }
     }

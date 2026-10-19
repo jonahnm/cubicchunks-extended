@@ -108,11 +108,13 @@ public final class ExtensionGenerator {
     private final RandomState randomState;
     private final Aquifer.FluidPicker fluidPicker;
     private final boolean deepslateStrata;
+    private final net.minecraft.world.level.chunk.PalettedContainerFactory containerFactory;
 
     public ExtensionGenerator(ServerLevel level, CubicConfig.CubicLevelState state) {
         this.level = level;
         this.state = state;
         this.generator = level.getChunkSource().getGenerator();
+        this.containerFactory = net.minecraft.world.level.chunk.PalettedContainerFactory.create(level.registryAccess());
 
         if (generator instanceof NoiseBasedChunkGenerator nbg) {
             this.settings = nbg.generatorSettings().value();
@@ -131,7 +133,9 @@ public final class ExtensionGenerator {
             this.stratumHeight = Math.max(16, type.height());
             this.randomState = null;
             this.fluidPicker = null;
-            this.deepslateStrata = !type.ultraWarm();
+            // DimensionType.ultraWarm() became an environment attribute in 26.x; hasCeiling() is the
+            // stable "this dimension is nether-shaped" flag and is what the filler choice keyed off.
+            this.deepslateStrata = !type.hasCeiling();
         }
     }
 
@@ -159,15 +163,8 @@ public final class ExtensionGenerator {
         int cubeMinY = sectionY << 4;
         ChunkPos chunkPos = chunk.getPos();
 
-        Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
-        PalettedContainer<BlockState> states = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY,
-                Blocks.AIR.defaultBlockState(),
-                PalettedContainer.Strategy.SECTION_STATES);
-        PalettedContainer<Holder<Biome>> biomes = new PalettedContainer<>(
-                biomeRegistry.asHolderIdMap(),
-                biomeRegistry.getHolderOrThrow(Biomes.PLAINS),
-                PalettedContainer.Strategy.SECTION_BIOMES);
+        PalettedContainer<BlockState> states = containerFactory.createForBlockStates();
+        PalettedContainer<Holder<Biome>> biomes = containerFactory.createForBiomes();
 
         if (settings != null) {
             fillFromVanillaNoise(chunk, cubeMinY, states);
@@ -284,7 +281,7 @@ public final class ExtensionGenerator {
 
     /** Fallback for dimensions without a NoiseBasedChunkGenerator: vanilla-ish strata only. */
     private void fillFallback(int cubeMinY, PalettedContainer<BlockState> states) {
-        boolean netherLike = level.dimensionType().ultraWarm();
+        boolean netherLike = level.dimensionType().hasCeiling();
         BlockState base = netherLike ? Blocks.NETHERRACK.defaultBlockState() : Blocks.STONE.defaultBlockState();
         BlockState deep = netherLike ? Blocks.NETHERRACK.defaultBlockState() : Blocks.DEEPSLATE.defaultBlockState();
         for (int y = 0; y < 16; y++) {

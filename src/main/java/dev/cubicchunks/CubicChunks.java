@@ -9,7 +9,7 @@ import dev.cubicchunks.command.CubicCommands;
 import dev.cubicchunks.core.ExtensionCubeManager;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.TickTask;
 import net.minecraft.server.level.ServerLevel;
@@ -22,7 +22,6 @@ import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.OnDatapackSyncEvent;
-import net.neoforged.neoforge.event.level.ChunkDataEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.level.LevelEvent;
@@ -48,8 +47,9 @@ public final class CubicChunks {
 
     public CubicChunks(IEventBus modBus, ModContainer container) {
         container.registerConfig(ModConfig.Type.COMMON, CubicConfig.SPEC);
+        CubicAttachments.ATTACHMENT_TYPES.register(modBus);
         modBus.addListener(this::registerPayloadHandlers);
-        if (FMLEnvironment.dist.isClient()) {
+        if (FMLEnvironment.getDist().isClient()) {
             NeoForge.EVENT_BUS.addListener(dev.cubicchunks.net.CubicSyncClientHandler::onClientLogout);
         }
         NeoForge.EVENT_BUS.addListener(this::onLevelLoad);
@@ -61,8 +61,6 @@ public final class CubicChunks {
         NeoForge.EVENT_BUS.addListener(this::onPlayerRespawn);
         NeoForge.EVENT_BUS.addListener(this::onDatapackSync);
         NeoForge.EVENT_BUS.addListener(this::onServerStarted);
-        NeoForge.EVENT_BUS.addListener(this::onChunkDataSave);
-        NeoForge.EVENT_BUS.addListener(this::onChunkDataLoad);
         LOGGER.info("Cubic Chunks Extended initialised");
     }
 
@@ -157,24 +155,25 @@ public final class CubicChunks {
      * generate extension cubes, then log the result a few seconds later.
      */
     private void debugDepthTest(ServerPlayer player, ExtensionCubeManager mgr) {
-        MinecraftServer server = player.getServer();
+        MinecraftServer server = mgr.level().getServer();
         if (server == null) {
             return;
         }
         ServerLevel sl = mgr.level();
         int targetY = Math.max(mgr.state().minY() + 32, mgr.generator().bandMinY() - 96);
-        server.tell(new TickTask(server.getTickCount() + 30, () -> {
-            player.teleportTo(sl, player.getX(), targetY, player.getZ(), player.getYRot(), player.getXRot());
+        server.schedule(new TickTask(server.getTickCount() + 30, () -> {
+            player.teleportTo(sl, player.getX(), targetY, player.getZ(),
+                    java.util.EnumSet.noneOf(net.minecraft.world.entity.Relative.class), player.getYRot(), player.getXRot(), false);
             player.sendSystemMessage(Component.literal("[CubicChunks] depth test: teleported to y=" + targetY));
             // schedule the result message relative to NOW (cubes stream in over its window)
-            server.tell(new TickTask(server.getTickCount() + 300, () -> {
+            server.schedule(new TickTask(server.getTickCount() + 300, () -> {
                 int cubes = mgr.generatedCount();
                 LOGGER.info("[CubicChunks] DEPTH TEST: {} extension cubes generated around player in {}",
-                        cubes, sl.dimension().location());
+                        cubes, sl.dimension().identifier());
                 player.sendSystemMessage(Component.literal(
                         "[CubicChunks] depth test: generated " + cubes + " extension cubes"));
                 try {
-                    mgr.debugReportCubeComposition(new net.minecraft.world.level.ChunkPos(player.blockPosition()));
+                    mgr.debugReportCubeComposition(net.minecraft.world.level.ChunkPos.containing(player.blockPosition()));
                 } catch (Throwable t) {
                     LOGGER.warn("[CubicChunks] composition report failed", t);
                 }
@@ -197,36 +196,9 @@ public final class CubicChunks {
         }
     }
 
-    /** Persists which extension cubes this mod generated, per column. */
-    private void onChunkDataSave(ChunkDataEvent.Save event) {
-        if (!(event.getLevel() instanceof ServerLevel serverLevel)
-                || !(MANAGERS.get(serverLevel.dimension()) instanceof ExtensionCubeManager manager)) {
-            return;
-        }
-        long[] bits = manager.generatedBitsetFor(event.getChunk().getPos());
-        if (bits != null) {
-            event.getData().putLongArray("CubicGeneratedSections", bits);
-        }
-    }
-
-    /** Restores the generated-marker (with a composition heuristic for older worlds). */
-    private void onChunkDataLoad(ChunkDataEvent.Load event) {
-        if (!(event.getLevel() instanceof ServerLevel serverLevel)
-                || !(MANAGERS.get(serverLevel.dimension()) instanceof ExtensionCubeManager manager)) {
-            return;
-        }
-        long[] bits = event.getData().getLongArray("CubicGeneratedSections");
-        var pos = event.getChunk().getPos();
-        if (bits.length > 0) {
-            manager.applyGeneratedBitset(pos, bits);
-        } else if (event.getChunk() instanceof net.minecraft.world.level.chunk.LevelChunk levelChunk) {
-            manager.markLikelyGeneratedFromChunk(pos, levelChunk);
-        }
-    }
-
-    private static List<ResourceLocation> parseDimensions() {
+    private static List<Identifier> parseDimensions() {
         return CubicConfig.ENABLED_DIMENSIONS.get().stream()
-                .map(ResourceLocation::parse)
+                .map(Identifier::parse)
                 .toList();
     }
 

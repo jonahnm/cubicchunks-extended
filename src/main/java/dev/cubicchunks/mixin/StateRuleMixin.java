@@ -33,12 +33,12 @@ public abstract class StateRuleMixin {
             return;
         }
         // Only extended overworld-style chunks (nether/end chunks keep their vanilla bedrock).
-        if (chunk.getMinBuildHeight() >= -64) {
+        if (chunk.getMinY() >= -64) {
             return;
         }
         SurfaceRule original = cir.getReturnValue();
         boolean keepFloor = CubicConfig.DEEP_BEDROCK_FLOOR.get();
-        int floor = chunk.getMinBuildHeight();
+        int floor = chunk.getMinY();
         cir.setReturnValue((x, y, z) -> {
             BlockState result = original.tryApply(x, y, z);
             if (result != null && result.is(Blocks.BEDROCK)) {

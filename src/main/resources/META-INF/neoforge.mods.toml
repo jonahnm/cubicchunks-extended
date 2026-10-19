@@ -1,14 +1,14 @@
 modLoader = "javafml"
-loaderVersion = "[4,)"
+loaderVersion = "[3,)"
 license = "MIT"
 
 [[mods]]
 modId = "cubicchunks"
-version = "0.1.0"
+version = "0.2.0"
 displayName = "Cubic Chunks Extended"
 authors = "Cubic Chunks Extended contributors"
 description = '''
-True cubic chunks for NeoForge 1.21.1. Worlds are divided into 16x16x16 cubes that load, generate and
+True cubic chunks for NeoForge 26.2 (Minecraft 26.2). Worlds are divided into 16x16x16 cubes that load, generate and
 unload vertically and independently, so build height and depth are configurable far beyond vanilla
 limits. Inside the vanilla band generation is the untouched vanilla pipeline (so modded biomes,
 structures, ores and blocks behave exactly as in vanilla); beyond vanilla limits the world continues
@@ -22,13 +22,13 @@ config = "cubicchunks.mixins.json"
 [[dependencies.cubicchunks]]
 modId = "neoforge"
 type = "required"
-versionRange = "[21.1.0,)"
+versionRange = "[26.2.0,)"
 ordering = "NONE"
 side = "BOTH"
 
 [[dependencies.cubicchunks]]
 modId = "minecraft"
 type = "required"
-versionRange = "[1.21.1,1.22)"
+versionRange = "[26.2,)"
 ordering = "NONE"
 side = "BOTH"

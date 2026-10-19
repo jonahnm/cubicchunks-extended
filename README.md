@@ -1,15 +1,18 @@
-# Cubic Chunks Extended (NeoForge 1.21.1)
+# Cubic Chunks Extended (NeoForge 26.2 / Minecraft 26.2)
 
-A Cubic Chunks–style world-height extension for Minecraft **1.21.1 / NeoForge (21.1.x)**.
-Build height and depth become configurable (default **`-2048 .. 1024`**, absolutely safe up to
-roughly **±8 000 000** with care) and everything **below the vanilla band is streamed as true
-16×16×16 cubic chunks**, generated on demand around each player's vertical position.
+A Cubic Chunks–style world-height extension for Minecraft **26.2 / NeoForge (26.2.x)**.
+Build height and depth become configurable (default **`-2048 .. 1024`**; this build is also tested
+at **`-4096 .. 2048`** — 385 sections per column) and everything **below the vanilla band is
+streamed as true 16×16×16 cubic chunks**, generated on demand around each player's vertical
+position. Coordinate packing allows up to about **±8 388 592**; note that 26.x's own
+`dimension_type` data is capped near ±2015 blocks, which the mod deliberately exceeds by
+overriding the level's height accessors — beyond a few thousand blocks the limit is your RAM.
 
 ![mod id](https://img.shields.io/badge/modid-cubicchunks-blue)
 
 ## Concept
 
-Vanilla 1.21.1 stores and streams worlds as vertical **columns** of 16×16 sections spanning the
+Vanilla 26.2 stores and streams worlds as vertical **columns** of 16×16 sections spanning the
 whole world height. This mod keeps exactly that machinery (compatibility!) and *adds* a cubic
 layer on top:
 
@@ -102,10 +105,12 @@ decoding (bounds are synced from the server at login; a stale client config is n
 
 ## Architecture (modder notes)
 
-- `mixin/ServerLevelMixin` / `mixin/ClientLevelMixin` add *real* `getMinBuildHeight()` /
-  `getHeight()` implementations, shadowing the `LevelReader` interface defaults. Chunks
-  (`ChunkAccess`) already delegate to the level accessor, so sections, heightmaps, light engine,
-  serializers and pathing regions inherit the new range for free.
+- `mixin/ServerLevelMixin` / `mixin/ClientLevelMixin` add *real* `getMinY()` / `getHeight()`
+  implementations, shadowing the `LevelHeightAccessor` interface defaults (26.x renamed
+  `getMinBuildHeight()`→`getMinY()`, and `getMaxY()` is now *inclusive*, derived from these two).
+  Chunks (`ChunkAccess`) delegate to the level accessor — `ChunkAccess.sections` is sized by
+  `levelHeightAccessor.getSectionsCount()` — so sections, heightmaps, light engine, serializers and
+  pathing regions inherit the new range for free.
 - `core/ExtensionCubeManager` — per-dimension server tick: builds the desired cube set around each
   player within their chunk tracking view (nearest columns first), generates missing cubes within a
   per-tick budget, lights them, places the cube's deep features, and re-sends chunks to tracking
@@ -149,11 +154,17 @@ Global worldgen mixins (inspired by and credited to the C2Chunks reference imple
   `placeStructurePieces` keep working at depth. It reads only the chunk's own structure marks
   (`ChunkAccess#getAllStarts`); asking the `StructureManager` for starts would load neighbour
   chunks from inside STRUCTURE_STARTS and deadlock the worldgen mailbox during spawn generation.
-- Generated-cube persistence: the set of generated sections is saved as a `long[]` bitset in the
-  chunk NBT (`ChunkDataEvent` save/load), so reloading a world neither re-generates nor loses
-  deep content. Sections that vanilla carvers wrote residue into (empty deep sections filled by
-  carving) are re-generated on load instead — that residue alone is what used to leave voids
-  you fall through.
+- Generated-cube persistence: the set of generated sections of a column is kept in a **chunk data
+  attachment** (`CubicAttachments.GENERATED_SECTIONS` → `worldgen/GeneratedSectionsData`, a
+  `ValueIOSerializable` `long[]` bitset). 26.2 chunk NBT is a structured record
+  (`SerializableChunkData`) with no free-form tag left for mods, so attachments are the supported
+  way to persist per-chunk state; the chunk serializer writes and restores them with the chunk.
+  The marker is merged back into the session set the first time a column is touched
+  (`ExtensionCubeManager#ensureColumnImported`), so reloading a world neither re-generates nor
+  loses deep content. Columns with no marker (older saves) fall back to the "already looks like
+  finished deep terrain" heuristic. Sections that vanilla carvers wrote residue into (empty deep
+  sections filled by carving) are re-generated instead — that residue alone is what used to leave
+  voids you fall through.
 - `gen/ExtensionGenerator#verifyAllCubesAgainstFullColumn` — the correctness oracle: one
   full-column `NoiseChunk` evaluated over `[minY, maxY)`, diffed against every streamed cube.
   Zero terrain mismatches (only feature-placement diffs) is the proof that per-cube noise equals
@@ -165,6 +176,45 @@ Global worldgen mixins (inspired by and credited to the C2Chunks reference imple
 - `StateRuleMixin` — relocates the bedrock floor to the configured world bottom; the vanilla band
   floor at y=-64 becomes deepslate (configurable).
 - `ClimateSamplerMixin` — maps deep biome sampling onto vanilla cave biomes.
+
+### Porting notes (26.2)
+
+Everything above is the same design as the 1.21.1 branch (`v0.1.0-mc1.21.1-neoforge21.1`); the
+port is the API surface, not the model. What actually moved:
+
+- **Renamed mappings.** `ResourceLocation` → `Identifier` (`ResourceLocationException` →
+  `IdentifierException`, `buf.readResourceLocation` → `readIdentifier`), `ResourceKey#location()` →
+  `identifier()`, `Vec3i` moved to `net.minecraft.core`.
+- **`ChunkPos` is a record** (`ChunkPos(int x, int z)`): field reads became `x()`/`z()`,
+  `toLong()` became `pack()`, and `new ChunkPos(BlockPos)` became `ChunkPos.containing(pos)`.
+- **Height accessors.** `getMinBuildHeight()` → `getMinY()`, `getMaxBuildHeight()` → `getMaxY()`
+  (now *inclusive*), `getMinSection()/getMaxSection()` → `getMinSectionY()/getMaxSectionY()`
+  (max inclusive). `CubeGenAccess` still reports the *vanilla band* through `getMinY()`/`getHeight()`
+  so feature distributions stay band-exact, while `getMaxY()`, the section-index helpers and
+  `isOutsideBuildHeight` delegate to the real (extended) level so deep writes are not clipped.
+- **NBT getters return `Optional`** (`CompoundTag#getString`, `#getIntArray`), and
+  `contains(name, type)` is gone — `core/DeepStructures` now reads through the optionals.
+- **Registry lookups.** `RegistryAccess#registryOrThrow` is gone in favour of `lookupOrThrow`
+  (`HolderLookup.Provider`), and registry `get()` returns a holder Optional; `DeepStructures`
+  uses `BuiltInRegistries.STRUCTURE_PIECE.getValue(id)`.
+- **Palettes.** `PalettedContainer.Strategy` was replaced by `PalettedContainerFactory`
+  (created once per generator, `createForBlockStates()` / `createForBiomes()`);
+  `LevelChunkSection` is still built from the two containers.
+- **Ore features write in bulk.** `OreFeature` now goes through `BulkSectionAccess`, which
+  dereferences `getChunk(x, z)` without a null check and writes straight into the section.
+  `gen/CubeGenAccess` therefore passes `requireChunk` through unchanged, and
+  `ExtensionCubeManager#cubeCanAcceptWrite` marks the owning column unsaved + queued for re-send,
+  since those writes no longer pass through `setBlock`.
+- **`DimensionType.ultraWarm()` is gone** (dimension behaviour moved to `EnvironmentAttributeMap`);
+  the nether-shaped fallback filler keys off `hasCeiling()` now.
+- **Command permissions** use `Commands.hasPermission(Commands.LEVEL_GAMEMASTERS)`; a player
+  teleport is `teleportTo(level, x, y, z, Set<Relative>, yRot, xRot, resetCamera)`.
+- **World layout changed in vanilla**: dimension data now lives under
+  `world/dimensions/<namespace>/<path>/region` (1.21.1 worlds are upgraded, not reused).
+- Verified on 26.2 with the same E2E as before: fresh world → 900 streamed cubes → clean save →
+  reload regenerates **0** cubes and restores **900** from the attachments → `verifyall 1`
+  reproduces byte-identical numbers (3 587 751 blocks, 261 structure-material terrain diffs, no
+  air residue) → `regen 1` rebuilds all 900 cubes in 4.6 s.
 
 ### Deliberate limits
 
@@ -179,8 +229,10 @@ Global worldgen mixins (inspired by and credited to the C2Chunks reference imple
   vanilla band; deep caves come from vanilla's density-driven caves instead.
 - Feature positions are rolled per cube; ore blobs that cross a cube boundary are clipped (like
   vanilla clips features at not-yet-generated chunk borders).
-- Y is limited to `SectionPos` packing (±8 388 592), not full int range; use saner configs even if
-  you get adventurous, every additional cube of world height costs base memory per loaded column.
+- Y is limited to `SectionPos` packing (±8 388 592), not full int range, and vanilla's own
+  `dimension_type` bounds (about ±2015 blocks of *data*) are deliberately bypassed by overriding
+  the level accessors — that is what makes depths like -4096 possible, but every additional cube of
+  world height costs base memory per loaded column (385 sections ≈ 1.5 MB of raw palette data).
 
 ## Building
 
@@ -188,4 +240,5 @@ Global worldgen mixins (inspired by and credited to the C2Chunks reference imple
 ./gradlew build
 ```
 
-(Requires a JDK 21 toolchain; Gradle will provision one automatically if absent.)
+(Minecraft 26.2 needs a **JDK 25** toolchain and the build needs **Gradle 8.14+ / 9.x** — the wrapper is
+pinned to 9.8.1. Gradle provisions a toolchain automatically if none is installed.)
