@@ -1,10 +1,8 @@
 package dev.cubicchunks;
 
 import java.util.List;
-import java.util.Locale;
 
 import net.minecraft.IdentifierException;
-import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.Level;
