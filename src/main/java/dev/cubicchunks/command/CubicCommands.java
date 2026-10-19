@@ -115,6 +115,10 @@ public final class CubicCommands {
         var pos = source.getPlayer() != null
                 ? source.getPlayer().chunkPosition()
                 : net.minecraft.world.level.ChunkPos.containing(level.getRespawnData().pos());
+        // 26.x drops idle spawn chunks quickly, so make the column resident first (the same
+        // loading path /verifyall uses) before asking the manager for a cube inside it.
+        level.getChunk(pos.x(), pos.z(),
+                net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true);
         boolean generated = manager.debugEnsureCube(pos, y);
         var chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
         if (chunk == null) {
