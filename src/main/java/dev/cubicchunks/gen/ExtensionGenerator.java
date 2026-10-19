@@ -105,6 +105,37 @@ public final class ExtensionGenerator {
     private final boolean deepslateStrata;
     private final net.minecraft.world.level.chunk.PalettedContainerFactory containerFactory;
 
+    // Debug: sub-phases of one cube, filled while the manager's cost profile is enabled.
+    public static final int SUB_CONTAINERS = 0;
+    public static final int SUB_BEARDIFIER = 1;
+    public static final int SUB_NOISE_CHUNK = 2;
+    public static final int SUB_FILL = 3;
+    public static final int SUB_BIOMES = 4;
+    public static final int SUB_COUNT = 5;
+    private static final int MAX_PROFILE_STRATA = 16;
+    private final long[] subPhaseNanos = new long[MAX_PROFILE_STRATA * SUB_COUNT];
+    private boolean subProfile;
+    private int subStratum = -1;
+
+    public void enableCostProfile() {
+        this.subProfile = true;
+        java.util.Arrays.fill(this.subPhaseNanos, 0L);
+    }
+
+    public void setProfileStratum(int stratum) {
+        this.subStratum = stratum;
+    }
+
+    public long[] costProfileNanos() {
+        return this.subPhaseNanos;
+    }
+
+    private void addSub(int phase, long startedAt) {
+        if (this.subStratum >= 0) {
+            this.subPhaseNanos[this.subStratum * SUB_COUNT + phase] += System.nanoTime() - startedAt;
+        }
+    }
+
     public ExtensionGenerator(ServerLevel level, CubicConfig.CubicLevelState state) {
         this.level = level;
         this.state = state;
@@ -155,26 +186,72 @@ public final class ExtensionGenerator {
      * it; the caller installs it into the chunk.
      */
     public LevelChunkSection generateCube(LevelChunk chunk, int sectionY) {
-        int cubeMinY = sectionY << 4;
-        ChunkPos chunkPos = chunk.getPos();
-
-        PalettedContainer<BlockState> states = containerFactory.createForBlockStates();
-        PalettedContainer<Holder<Biome>> biomes = containerFactory.createForBiomes();
-
-        if (settings != null) {
-            fillFromVanillaNoise(chunk, cubeMinY, states);
-        } else {
-            fillFallback(cubeMinY, states);
-        }
-        fillBiomes(cubeMinY, chunkPos, biomes);
-
-        return new LevelChunkSection(states, biomes);
+        return generateWindow(chunk, sectionY, 1)[0];
     }
 
-    private void fillFromVanillaNoise(LevelChunk chunk, int cubeMinY, PalettedContainer<BlockState> states) {
+    /**
+     * Builds a run of contiguous cubes below the band with a single noise graph.
+     *
+     * <p>Constructing {@link NoiseChunk} is the expensive part of generating a cube - it costs
+     * several times what filling the cubes after it costs. Vanilla builds one per column and fills
+     * 24 cubes with it; building one per 16-block cube pays for that construction 24 times over, so
+     * the deeper a player goes, the more of the streamer's time went into rebuilding the same noise
+     * graph again and again. A run shares one construction and one walk of the density cells, while
+     * every cube still gets its own palettes, biomes and strata - the blocks at a given coordinate
+     * are exactly what filling that cube on its own produced.
+     *
+     * @param firstSectionY section Y of the first (shallowest) cube of the run
+     * @param count         how many contiguous cubes to build
+     */
+    public LevelChunkSection[] generateWindow(LevelChunk chunk, int firstSectionY, int count) {
+        int windowMinY = firstSectionY << 4;
+        int windowHeight = count << 4;
+        ChunkPos chunkPos = chunk.getPos();
+        if (this.subProfile) {
+            this.subStratum = profileStratumFor(firstSectionY);
+        }
+
+        @SuppressWarnings("unchecked")
+        PalettedContainer<BlockState>[] states = new PalettedContainer[count];
+        @SuppressWarnings("unchecked")
+        PalettedContainer<Holder<Biome>>[] biomes = new PalettedContainer[count];
+        long phaseStart = System.nanoTime();
+        for (int i = 0; i < count; i++) {
+            states[i] = containerFactory.createForBlockStates();
+            biomes[i] = containerFactory.createForBiomes();
+        }
+        addSub(SUB_CONTAINERS, phaseStart);
+
+        if (settings != null) {
+            fillFromVanillaNoise(chunk, windowMinY, windowHeight, states);
+        } else {
+            fillFallback(windowMinY, windowHeight, states);
+        }
+
+        LevelChunkSection[] sections = new LevelChunkSection[count];
+        for (int i = 0; i < count; i++) {
+            if (this.subProfile) {
+                this.subStratum = profileStratumFor(firstSectionY + i);
+            }
+            phaseStart = System.nanoTime();
+            fillBiomes(windowMinY + i * 16, chunkPos, biomes[i]);
+            addSub(SUB_BIOMES, phaseStart);
+            sections[i] = new LevelChunkSection(states[i], biomes[i]);
+        }
+        return sections;
+    }
+
+    /** Which depth stratum a section belongs to; cost attribution only. */
+    private int profileStratumFor(int sectionY) {
+        int raw = Math.floorDiv(bandMinY() - (sectionY << 4), Math.max(16, stratumHeight()));
+        return Math.max(0, Math.min(MAX_PROFILE_STRATA - 1, raw));
+    }
+
+    private void fillFromVanillaNoise(
+            LevelChunk chunk, int windowMinY, int windowHeight, PalettedContainer<BlockState>[] states) {
         NoiseSettings base = settings.noiseSettings();
         NoiseSettings cubeSettings =
-                new NoiseSettings(cubeMinY, 16, base.noiseSizeHorizontal(), base.noiseSizeVertical());
+                new NoiseSettings(windowMinY, windowHeight, base.noiseSizeHorizontal(), base.noiseSizeVertical());
         NoiseGeneratorSettings cubeGenSettings = new NoiseGeneratorSettings(
                 cubeSettings,
                 settings.defaultBlock(),
@@ -190,8 +267,11 @@ public final class ExtensionGenerator {
 
         ChunkPos chunkPos = chunk.getPos();
         // real Beardifier: terrain adaptation (beard) around deep structure pieces
+        long phaseStart = System.nanoTime();
         var beardifier = net.minecraft.world.level.levelgen.Beardifier.forStructuresInChunk(
                 level.structureManager(), chunkPos);
+        addSub(SUB_BEARDIFIER, phaseStart);
+        phaseStart = System.nanoTime();
         CubeNoiseChunk noiseChunk = new CubeNoiseChunk(
                 16 / cubeSettings.getCellWidth(),
                 randomState,
@@ -207,10 +287,12 @@ public final class ExtensionGenerator {
         int cellWidth = cubeSettings.getCellWidth();
         int cellHeight = cubeSettings.getCellHeight();
         int cellsXZ = 16 / cellWidth;
-        int cellsY = Math.floorDiv(16, cellHeight);
-        int firstCellY = Math.floorDiv(cubeMinY, cellHeight);
+        int cellsY = Math.floorDiv(windowHeight, cellHeight);
+        int firstCellY = Math.floorDiv(windowMinY, cellHeight);
 
         noiseChunk.initializeForFirstCellX();
+        addSub(SUB_NOISE_CHUNK, phaseStart);
+        phaseStart = System.nanoTime();
         for (int cx = 0; cx < cellsXZ; cx++) {
             noiseChunk.advanceCellX(cx);
             for (int cz = 0; cz < cellsXZ; cz++) {
@@ -238,7 +320,9 @@ public final class ExtensionGenerator {
                                         continue;
                                     }
                                 }
-                                states.set(inCellX + cx * cellWidth, absY & 15, inCellZ + cz * cellWidth, block);
+                                int relY = absY - windowMinY;
+                                states[relY >> 4].set(inCellX + cx * cellWidth, relY & 15,
+                                        inCellZ + cz * cellWidth, block);
                             }
                         }
                     }
@@ -247,6 +331,7 @@ public final class ExtensionGenerator {
             noiseChunk.swapSlices();
         }
         noiseChunk.stopInterpolation();
+        addSub(SUB_FILL, phaseStart);
     }
 
     /**
@@ -275,16 +360,16 @@ public final class ExtensionGenerator {
     }
 
     /** Fallback for dimensions without a NoiseBasedChunkGenerator: vanilla-ish strata only. */
-    private void fillFallback(int cubeMinY, PalettedContainer<BlockState> states) {
+    private void fillFallback(int windowMinY, int windowHeight, PalettedContainer<BlockState>[] states) {
         boolean netherLike = level.dimensionType().hasCeiling();
         BlockState base = netherLike ? Blocks.NETHERRACK.defaultBlockState() : Blocks.STONE.defaultBlockState();
         BlockState deep = netherLike ? Blocks.NETHERRACK.defaultBlockState() : Blocks.DEEPSLATE.defaultBlockState();
-        for (int y = 0; y < 16; y++) {
-            int absY = cubeMinY + y;
+        for (int y = 0; y < windowHeight; y++) {
+            int absY = windowMinY + y;
             BlockState layer = absY <= 0 ? deep : base;
             for (int x = 0; x < 16; x++) {
                 for (int z = 0; z < 16; z++) {
-                    states.set(x, y, z, layer);
+                    states[y >> 4].set(x, y & 15, z, layer);
                 }
             }
         }
@@ -302,6 +387,8 @@ public final class ExtensionGenerator {
         }
         boolean remap = CubicConfig.REMAP_DEEP_BIOMES.get();
         WorldGenState.REMAP_DEEP_BIOMES.set(remap);
+        WorldGenState.REMAP_BAND_MIN_Y.set(bandMinY());
+        WorldGenState.REMAP_WORLD_MIN_Y.set(level.getMinY());
         try {
             for (int qx = 0; qx < 4; qx++) {
                 for (int qz = 0; qz < 4; qz++) {

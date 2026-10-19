@@ -25,6 +25,8 @@ public final class CubicConfig {
 
     public static final ModConfigSpec.IntValue VERTICAL_LOAD_DISTANCE;
     public static final ModConfigSpec.IntValue GENERATION_PER_TICK;
+    public static final ModConfigSpec.IntValue STREAM_NEAR_RADIUS;
+    public static final ModConfigSpec.IntValue STREAM_FAR_CUBES;
 
     public static final ModConfigSpec.BooleanValue DEEP_BEDROCK_FLOOR;
     public static final ModConfigSpec.BooleanValue REMAP_DEEP_BIOMES;
@@ -80,6 +82,14 @@ public final class CubicConfig {
             .push("streaming");
         VERTICAL_LOAD_DISTANCE = b.defineInRange("verticalLoadDistance", 5, 1, 64);
         GENERATION_PER_TICK = b.defineInRange("generationBudgetPerTick", 2, 1, 64);
+        b.comment("Columns within streamNearRadius of a player are streamed with the full vertical",
+                "window (verticalLoadDistance below the eye plus a digging margin). Columns further",
+                "out keep only streamFarCubes above and below the eye: what a player can see at the",
+                "edge of their view is the layer they are in, and every extra cube there costs a",
+                "whole-column save and a whole-column chunk packet, both of which get more expensive",
+                "the deeper that column has been filled.");
+        STREAM_NEAR_RADIUS = b.defineInRange("streamNearRadius", 3, 1, 32);
+        STREAM_FAR_CUBES = b.defineInRange("streamFarCubes", 2, 1, 32);
         b.pop();
 
         b.comment(

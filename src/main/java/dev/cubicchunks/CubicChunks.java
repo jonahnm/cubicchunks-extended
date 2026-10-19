@@ -89,7 +89,12 @@ public final class CubicChunks {
 
     private void onLevelUnload(LevelEvent.Unload event) {
         if (event.getLevel() instanceof ServerLevel serverLevel) {
-            MANAGERS.remove(serverLevel.dimension());
+            ExtensionCubeManager manager = MANAGERS.remove(serverLevel.dimension());
+            if (manager != null) {
+                // A column whose generation is still running has its save held back; hand it over
+                // before the level goes away.
+                manager.flushForShutdown();
+            }
         }
     }
 

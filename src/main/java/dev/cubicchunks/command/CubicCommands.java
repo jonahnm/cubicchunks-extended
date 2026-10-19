@@ -33,6 +33,12 @@ public final class CubicCommands {
                                 .executes(ctx -> verify(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "y")))))
                 .then(Commands.literal("bounds")
                         .executes(ctx -> bounds(ctx.getSource())))
+                .then(Commands.literal("bench")
+                        .then(Commands.argument("radius", IntegerArgumentType.integer(0, 8))
+                                .then(Commands.argument("toY", IntegerArgumentType.integer(-8388592, 320))
+                                        .executes(ctx -> bench(ctx.getSource(),
+                                                IntegerArgumentType.getInteger(ctx, "radius"),
+                                                IntegerArgumentType.getInteger(ctx, "toY"))))))
                 .then(Commands.literal("regen")
                         .executes(ctx -> regen(ctx.getSource(), -1))
                         .then(Commands.argument("radius", IntegerArgumentType.integer(0, 64))
@@ -69,6 +75,24 @@ public final class CubicCommands {
      * there: the fresh cube is merged over the installed one, so only blocks vanilla generation
      * could have produced are replaced.
      */
+    /** Debug: measure what a straight descent costs at increasing depth (see the log). */
+    private static int bench(CommandSourceStack source, int radius, int toY) {
+        ServerLevel level = source.getLevel();
+        dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);
+        if (manager == null) {
+            source.sendFailure(Component.literal("Dimension " + level.dimension().identifier()
+                    + " is not cubic-enabled."));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal(
+                "[CubicChunks] bench: walking a descent down to y=" + toY
+                        + " over a " + (2 * radius + 1) + "x" + (2 * radius + 1) + " column area"
+                        + " - watch the server log."), false);
+        manager.debugDescentBench(radius, net.minecraft.core.SectionPos.blockToSectionCoord(toY));
+        source.sendSuccess(() -> Component.literal("[CubicChunks] bench finished."), false);
+        return 1;
+    }
+
     private static int regen(CommandSourceStack source, int radius) {
         ServerLevel level = source.getLevel();
         dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);

@@ -59,10 +59,66 @@ public final class ExtensionCubeManager {
 
     /** Cubes generated this session (avoids re-noising restored-from-disk sections). */
     private final LongOpenHashSet generated = new LongOpenHashSet();
+    /**
+     * Per-column bookkeeping for what a changed column still owes the world: a save and a resend.
+     *
+     * <p>Both are whole-column operations in vanilla. Saving a column re-copies every one of its
+     * sections and light layers ({@code SerializableChunkData.copyOf} runs on the server thread),
+     * and a chunk packet carries the whole column too - so doing either once per generated cube is
+     * what made deep exploration degrade with depth: each further cube made every later save of
+     * that column more expensive. A column is therefore only handed to vanilla once its generation
+     * has gone quiet, and columns far from any player are refreshed lazily instead of per cube.
+     */
+    private static final int SAVE_QUIET_TICKS = 20;
+    private static final int SEND_QUIET_TICKS = 20;
+    private static final int WORK_DEFER_LIMIT_TICKS = 100;
+    private final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap columnLastTouched =
+            new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet pendingSave =
+            new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet pendingSend =
+            new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+
     /** Columns whose persisted generated-marker has been merged into {@link #generated}. */
     private final Set<ChunkPos> importedColumns = new HashSet<>();
-    /** Columns that need a full re-send (extension cubes changed after initial packet). */
-    private final Set<ChunkPos> resendQueue = new HashSet<>();
+
+    /**
+     * Debug: per-phase cost of one extension cube, bucketed by how far below the vanilla band it
+     * is. Enabled only by {@link #debugPregenAroundSpawn}, which walks a controlled descent — the
+     * numbers then say directly which part of cube generation grows with depth.
+     */
+    private static final int PHASE_NOISE = 0;
+    private static final int PHASE_MERGE = 1;
+    private static final int PHASE_FEATURES = 2;
+    private static final int PHASE_STRUCTURES = 3;
+    private static final int PHASE_TAIL = 4;
+    private static final int PHASE_COUNT = 5;
+    private static final int MAX_STRATA = 16;
+    private boolean profileCost;
+    private int profileStratum = -1;
+    private long profileSends;
+    private long profileSaveMarks;
+    private final long[] profileNanos = new long[MAX_STRATA * PHASE_COUNT];
+    private final long[] profileCubes = new long[MAX_STRATA];
+    private final long[] profileCandidates = new long[MAX_STRATA];
+    private final long[] profilePlaced = new long[MAX_STRATA];
+
+    private int stratumOf(int sectionY) {
+        int raw = Math.floorDiv(generator.bandMinY() - (sectionY << 4), Math.max(16, generator.stratumHeight()));
+        return Math.max(0, Math.min(MAX_STRATA - 1, raw));
+    }
+
+    private void addPhase(int phase, int stratum, long nanos) {
+        if (stratum >= 0) {
+            this.profileNanos[stratum * PHASE_COUNT + phase] += nanos;
+        }
+    }
+
+    private void markPhase(int phase, int stratum, long startedAt) {
+        if (stratum >= 0) {
+            this.profileNanos[stratum * PHASE_COUNT + phase] += System.nanoTime() - startedAt;
+        }
+    }
 
     private final Set<Class<?>> complainedFeatureFailures = new HashSet<>();
     /**
@@ -189,7 +245,6 @@ public final class ExtensionCubeManager {
             return;
         }
         chunk.getData(CubicAttachments.GENERATED_SECTIONS).setBits(bits);
-        chunk.markUnsaved();
     }
 
     public long[] generatedBitsetFor(ChunkPos pos) {
@@ -303,6 +358,9 @@ public final class ExtensionCubeManager {
     /** Test aid: synchronously generate {@code depth} extension cubes below spawn (ring of columns). */
     public void debugPregenAroundSpawn(int depth, int radius) {
         ChunkPos spawn = ChunkPos.containing(level.getRespawnData().pos());
+        this.profileCost = true;
+        resetCostProfile();
+        this.generator.enableCostProfile();
         int zoneTop = generator.bandMinSection() - 1;
         int done = 0;
         long startNanos = System.nanoTime();
@@ -329,10 +387,315 @@ public final class ExtensionCubeManager {
                 }
             }
         }
-        flushResends();
+        flushColumnWork(true);
         CubicChunks.LOGGER.info("[CubicChunks] pre-generated {} extension cubes (radius {}) in {} ms",
                 done, radius, (System.nanoTime() - startNanos) / 1_000_000);
         debugReportCubeComposition(spawn);
+        logCostProfile();
+        debugReportBiomeProfile(java.util.List.of(spawn));
+        this.profileCost = false;
+    }
+
+    /**
+     * Debug: walk a straight descent the way a falling player does and report what each depth
+     * costs. Every generated cube marks its column dirty, and a re-send carries the WHOLE column
+     * (all sections plus every client-sent heightmap array), so what a re-send costs grows with
+     * how much of that column has already been filled - that is the quadratic part of deep
+     * exploration, and this measures it directly.
+     */
+    public void debugDescentBench(int radius, int toSectionY) {
+        ChunkPos spawn = ChunkPos.containing(level.getRespawnData().pos());
+        java.util.List<ChunkPos> columns = new java.util.ArrayList<>();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                columns.add(new ChunkPos(spawn.x() + dx, spawn.z() + dz));
+            }
+        }
+        for (ChunkPos col : columns) {
+            level.getChunk(col.x(), col.z(),
+                    net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true);
+        }
+        this.profileCost = true;
+        this.benchViewer = spawn;
+        resetCostProfile();
+        int vert = CubicConfig.VERTICAL_LOAD_DISTANCE.get();
+        for (int eye = generator.bandMinSection() - 1; eye >= toSectionY; eye -= 8) {
+            java.util.ArrayDeque<Long> window = new java.util.ArrayDeque<>();
+            collectDesiredCubes(spawn, eye, vert, columns, window);
+            workQueue.clear();
+            workQueue.addAll(window);
+            long start = System.nanoTime();
+            int cubes = 0;
+            // Drain the window the way the tick loop does: runs of neighbouring cubes in one column,
+            // capped by the configured per-tick budget.
+            while (!workQueue.isEmpty()) {
+                if (considerCube(workQueue.pollFirst())) {
+                    cubes++;
+                }
+            }
+            long genNanos = System.nanoTime() - start;
+            long touched = pendingSend.size();
+            this.profileSends = 0;
+            this.profileSaveMarks = 0;
+            long flushStart = System.nanoTime();
+            flushColumnWork(false);
+            long flushNanos = System.nanoTime() - flushStart;
+            long[] unit = measureColumnUnitCost(spawn);
+            CubicChunks.LOGGER.info(
+                    "[CubicChunks] bench eye y {}: {} cubes generated in {} ms ({} /cube);"
+                            + " columns changed this layer: {} (the old policy would re-send and"
+                            + " re-save every one of them now); columns refreshed now: {} in {} ms;"
+                            + " columns handed to the save path: {}; one column at this depth costs"
+                            + " {} ms to send and {} ms to save ({} filled sections)",
+                    eye << 4, cubes, genNanos / 1_000_000,
+                    cubes == 0 ? "-" : fmtMs(genNanos, cubes),
+                    touched, this.profileSends, flushNanos / 1_000_000, this.profileSaveMarks,
+                    unit[0] / 1_000_000, unit[1] / 1_000_000, unit[2]);
+        }
+        this.benchViewer = null;
+        logCostProfile();
+        debugColumnSaveBreakdown(spawn);
+        debugReportBiomeProfile(columns);
+        debugReportCubeComposition(spawn);
+        this.profileCost = false;
+    }
+
+    /**
+     * What one whole-column operation costs at the current depth: the chunk packet vanilla builds
+     * for a re-send, and {@code SerializableChunkData.copyOf} - the copy of every section palette,
+     * light layer and heightmap that {@code ChunkMap.save} does on the server thread.
+     */
+    private long[] measureColumnUnitCost(ChunkPos centre) {
+        LevelChunk chunk = level.getChunkSource().getChunkNow(centre.x(), centre.z());
+        if (chunk == null) {
+            return new long[] {0L, 0L, 0L};
+        }
+        var lightEngine = level.getChunkSource().getLightEngine();
+        long start = System.nanoTime();
+        new ClientboundLevelChunkWithLightPacket(chunk, lightEngine, null, null);
+        long packetNanos = System.nanoTime() - start;
+        start = System.nanoTime();
+        net.minecraft.world.level.chunk.storage.SerializableChunkData.copyOf(level, chunk);
+        long saveNanos = System.nanoTime() - start;
+        long filled = 0;
+        for (LevelChunkSection section : chunk.getSections()) {
+            if (!section.hasOnlyAir()) {
+                filled++;
+            }
+        }
+        return new long[] {packetNanos, saveNanos, filled};
+    }
+
+    /**
+     * Debug: split {@code SerializableChunkData.copyOf}'s work into the pieces it is made of, so
+     * the part that grows with depth can be named instead of guessed at.
+     */
+    public void debugColumnSaveBreakdown(ChunkPos centre) {
+        LevelChunk chunk = level.getChunkSource().getChunkNow(centre.x(), centre.z());
+        if (chunk == null) {
+            CubicChunks.LOGGER.warn("[CubicChunks] save breakdown: column {} is not loaded", centre);
+            return;
+        }
+        long[] times = new long[8];
+        long[][] counts = new long[8][];
+        long start = System.nanoTime();
+        int hmTypes = 0;
+        long hmLongs = 0;
+        for (java.util.Map.Entry<net.minecraft.world.level.levelgen.Heightmap.Types,
+                net.minecraft.world.level.levelgen.Heightmap> entry : chunk.getHeightmaps()) {
+            if (chunk.getPersistedStatus().getChunkSaveHeightmaps().contains(entry.getKey())) {
+                hmTypes++;
+                hmLongs += entry.getValue().getRawData().length;
+            }
+        }
+        times[0] = System.nanoTime() - start;
+        counts[0] = new long[] {hmTypes, hmLongs};
+
+        start = System.nanoTime();
+        long copiedSections = 0;
+        for (LevelChunkSection section : chunk.getSections()) {
+            if (!section.hasOnlyAir()) {
+                section.copy();
+                copiedSections++;
+            }
+        }
+        times[1] = System.nanoTime() - start;
+        counts[1] = new long[] {copiedSections, chunk.getSections().length};
+
+        start = System.nanoTime();
+        var light = level.getChunkSource().getLightEngine();
+        long lightSections = 0, lightCopies = 0;
+        for (int sectionY = light.getMinLightSection(); sectionY < light.getMaxLightSection(); sectionY++) {
+            lightSections++;
+            for (net.minecraft.world.level.LightLayer layer
+                    : net.minecraft.world.level.LightLayer.values()) {
+                net.minecraft.world.level.chunk.DataLayer data =
+                        light.getLayerListener(layer).getDataLayerData(SectionPos.of(centre, sectionY));
+                if (data != null && !data.isEmpty()) {
+                    data.copy();
+                    lightCopies++;
+                }
+            }
+        }
+        times[2] = System.nanoTime() - start;
+        counts[2] = new long[] {lightSections, lightCopies};
+
+        start = System.nanoTime();
+        chunk.getTicksForSerialization(level.getGameTime());
+        times[3] = System.nanoTime() - start;
+
+        start = System.nanoTime();
+        chunk.getUpgradeData().copy();
+        times[4] = System.nanoTime() - start;
+
+        start = System.nanoTime();
+        chunk.writeAttachmentsToNBT(level.registryAccess());
+        times[5] = System.nanoTime() - start;
+
+        start = System.nanoTime();
+        long structurePieces = 0;
+        int structureStarts = 0;
+        for (StructureStart s : chunk.getAllStarts().values()) {
+            if (s == null || !s.isValid()) {
+                continue;
+            }
+            structureStarts++;
+            structurePieces += s.getPieces().size();
+        }
+        times[6] = System.nanoTime() - start;
+        counts[6] = new long[] {structureStarts, structurePieces};
+
+        start = System.nanoTime();
+        net.minecraft.world.level.chunk.storage.SerializableChunkData.copyOf(level, chunk);
+        times[7] = System.nanoTime() - start;
+
+        CubicChunks.LOGGER.info(
+                "[CubicChunks] save breakdown for column {}: heightmaps {} types / {} longs = {} ms;"
+                        + " section copies {} of {} = {} ms; light scan {} sections, {} copies = {} ms;"
+                        + " tick packing {} ms; upgrade data {} ms; structure data {} starts / {} pieces"
+                        + " = {} ms; attachments {} ms; the whole copyOf call {} ms",
+                centre, hmTypes, hmLongs, ms(times[0]), copiedSections, chunk.getSections().length,
+                ms(times[1]), lightSections, lightCopies, ms(times[2]), ms(times[3]), ms(times[4]),
+                structureStarts, structurePieces, ms(times[6]), ms(times[5]), ms(times[7]));
+    }
+
+    private static String ms(long nanos) {
+        return String.format(java.util.Locale.ROOT, "%.1f", (double) nanos / 1_000_000.0);
+    }
+
+    private static String fmtMs(long nanos, long count) {
+        return String.format(java.util.Locale.ROOT, "%.1f", (double) nanos / 1_000_000.0 / (double) Math.max(1L, count));
+    }
+
+    private void resetCostProfile() {
+        java.util.Arrays.fill(this.profileNanos, 0L);
+        java.util.Arrays.fill(this.profileCubes, 0L);
+        java.util.Arrays.fill(this.profileCandidates, 0L);
+        java.util.Arrays.fill(this.profilePlaced, 0L);
+        this.profileFeatureEvals = 0L;
+    }
+
+    /** Debug: print the collected per-stratum generation cost profile. */
+    public void logCostProfile() {
+        int stratumHeight = Math.max(16, generator.stratumHeight());
+        long totalCubes = 0L;
+        for (long cubes : this.profileCubes) {
+            totalCubes += cubes;
+        }
+        for (int s = 0; s < MAX_STRATA; s++) {
+            long cubes = this.profileCubes[s];
+            if (cubes == 0) {
+                continue;
+            }
+            int topY = generator.bandMinY() - s * stratumHeight;
+            CubicChunks.LOGGER.info(
+                    "[CubicChunks] cost stratum {} (y {}..{}): {} cubes | per cube: noise {} ms, merge {} ms,"
+                            + " features {} ms, structures {} ms, tail {} ms | feature candidates {},"
+                            + " placed {}",
+                    s, topY - stratumHeight, topY, cubes,
+                    msPerCube(this.profileNanos[s * PHASE_COUNT + PHASE_NOISE], cubes),
+                    msPerCube(this.profileNanos[s * PHASE_COUNT + PHASE_MERGE], cubes),
+                    msPerCube(this.profileNanos[s * PHASE_COUNT + PHASE_FEATURES], cubes),
+                    msPerCube(this.profileNanos[s * PHASE_COUNT + PHASE_STRUCTURES], cubes),
+                    msPerCube(this.profileNanos[s * PHASE_COUNT + PHASE_TAIL], cubes),
+                    fmtPerCube(this.profileCandidates[s], cubes),
+                    fmtPerCube(this.profilePlaced[s], cubes));
+            CubicChunks.LOGGER.info(
+                    "[CubicChunks]   stratum {} placement: {} candidate positions read,"
+                            + " {} passed to features, {} placement passes evaluated for {} cubes",
+                    s, fmtPerCube(this.profileCandidates[s], cubes),
+                    fmtPerCube(this.profilePlaced[s], cubes),
+                    String.format(java.util.Locale.ROOT, "%.2f", (double) this.profileFeatureEvals / (double) Math.max(1L, totalCubes)),
+                    cubes);
+            long[] sub = this.generator.costProfileNanos();
+            CubicChunks.LOGGER.info(
+                    "[CubicChunks]   stratum {} cube internals: palettes {} ms, beardifier {} ms,"
+                            + " noise-chunk {} ms, density fill {} ms, biomes {} ms",
+                    s,
+                    msPerCube(sub[s * ExtensionGenerator.SUB_COUNT + ExtensionGenerator.SUB_CONTAINERS], cubes),
+                    msPerCube(sub[s * ExtensionGenerator.SUB_COUNT + ExtensionGenerator.SUB_BEARDIFIER], cubes),
+                    msPerCube(sub[s * ExtensionGenerator.SUB_COUNT + ExtensionGenerator.SUB_NOISE_CHUNK], cubes),
+                    msPerCube(sub[s * ExtensionGenerator.SUB_COUNT + ExtensionGenerator.SUB_FILL], cubes),
+                    msPerCube(sub[s * ExtensionGenerator.SUB_COUNT + ExtensionGenerator.SUB_BIOMES], cubes));
+        }
+    }
+
+    private static String fmtPerCube(long count, long cubes) {
+        return String.format(java.util.Locale.ROOT, "%.1f", (double) count / (double) Math.max(1L, cubes));
+    }
+
+    private static double msPerCube(long nanos, long cubes) {
+        return (double) nanos / 1_000_000.0 / (double) Math.max(1L, cubes);
+    }
+
+    /** Debug: which biomes the extension cubes actually hold, bucketed by depth. */
+    /**
+     * Debug: which biomes actually ended up at which depth, over several columns. Sampling a few
+     * spots inside each section rather than one shows whether a layer is uniform or carries the
+     * patches the profile is meant to produce.
+     */
+    public void debugReportBiomeProfile(java.util.Collection<ChunkPos> positions) {
+        int stratumHeight = Math.max(16, generator.stratumHeight());
+        java.util.Map<String, Integer>[] perStratum = new java.util.Map[MAX_STRATA];
+        for (int i = 0; i < MAX_STRATA; i++) {
+            perStratum[i] = new java.util.HashMap<String, Integer>();
+        }
+        // Section biomes are stored at 4-block resolution: the container is indexed 0..3 per axis.
+        int[][] probes = {{0, 0, 0}, {3, 1, 0}, {0, 3, 3}, {3, 3, 1}};
+        for (ChunkPos pos : positions) {
+            LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
+            if (chunk == null) {
+                continue;
+            }
+            for (int sy = generator.bandMinSection() - 1; sy >= state.minSection(); sy--) {
+                long key = SectionPos.asLong(pos.x(), sy, pos.z());
+                if (!generated.contains(key)) {
+                    continue;
+                }
+                int idx = chunk.getSectionIndexFromSectionY(sy);
+                if (idx < 0 || idx >= chunk.getSections().length) {
+                    continue;
+                }
+                for (int[] probe : probes) {
+                    Holder<Biome> biome = chunk.getSections()[idx].getBiomes().get(probe[0], probe[1], probe[2]);
+                    String id = biome.unwrapKey().map(k -> k.identifier().toString()).orElse("[unregistered]");
+                    perStratum[stratumOf(sy)].merge(id, 1, Integer::sum);
+                }
+            }
+        }
+        for (int s = 0; s < MAX_STRATA; s++) {
+            if (perStratum[s].isEmpty()) {
+                continue;
+            }
+            int topY = generator.bandMinY() - s * stratumHeight;
+            String top = perStratum[s].entrySet().stream()
+                    .sorted(java.util.Map.Entry.<String, Integer>comparingByValue().reversed())
+                    .limit(5)
+                    .map(e -> e.getValue() + "x " + e.getKey())
+                    .reduce((a, b) -> a + ", " + b)
+                    .orElse("-");
+            CubicChunks.LOGGER.info("[CubicChunks] biomes y {}..{}: {}", topY - stratumHeight, topY, top);
+        }
     }
 
     /**
@@ -425,52 +788,79 @@ public final class ExtensionCubeManager {
             budget -= considerCube(cubeKey) ? 1 : 0;
         }
 
-        flushResends();
+        flushColumnWork(false);
+    }
+
+    /** Everything outstanding must reach the world before a level is unloaded. */
+    public void flushForShutdown() {
+        flushColumnWork(true);
     }
 
     /** Desired below-band cubes, nearest-first around each player's eye level. */
     private void buildWorkQueue() {
         workQueue.clear();
         int vert = CubicConfig.VERTICAL_LOAD_DISTANCE.get();
-        int zoneTop = generator.bandMinSection() - 1;
 
         for (ServerPlayer player : level.getPlayers(p -> true)) {
             ChunkTrackingView view = player.getChunkTrackingView();
             if (view == ChunkTrackingView.EMPTY) {
                 continue;
             }
-            int eye = SectionPos.blockToSectionCoord(Mth.floor(player.getY()));
-            // Below the player we stream deeper than above: digging/falling must never outrun
-            // generation, and pre-generating a margin below makes deep descents seamless.
-            int belowDist = vert + FALL_MARGIN_CUBES;
-            int yMax = Math.min(eye + vert, zoneTop);
-            int yMin = Math.max(eye - belowDist, state.minSection());
-            if (yMin > yMax) {
-                continue;
-            }
-            final int yMinF = yMin;
-            final int yMaxF = yMax;
-            final int eyeF = eye;
-            final int belowDistF = belowDist;
-            final int vertF = vert;
-            // Nearest columns first so cubes materialize around the player, not at the fringes.
             List<ChunkPos> columns = new ArrayList<>();
             view.forEach(columns::add);
-            ChunkPos playerChunk = player.chunkPosition();
-            columns.sort((a, b) -> Double.compare(
-                    distanceSq(playerChunk, a), distanceSq(playerChunk, b)));
-            for (ChunkPos colPos : columns) {
-                for (int dy = 0; dy <= belowDistF + vertF; dy++) {
-                    int below = eyeF - dy;
-                    if (below >= yMinF && below <= yMaxF) {
-                        workQueue.addLast(SectionPos.asLong(colPos.x(), below, colPos.z()));
-                    }
-                    if (dy > 0 && dy <= vertF) {
-                        int above = eyeF + dy;
-                        if (above >= yMinF && above <= yMaxF) {
-                            workQueue.addLast(SectionPos.asLong(colPos.x(), above, colPos.z()));
-                        }
-                    }
+            collectDesiredCubes(
+                    player.chunkPosition(),
+                    SectionPos.blockToSectionCoord(Mth.floor(player.getY())),
+                    vert, columns, workQueue);
+        }
+    }
+
+    /**
+     * The cubes one streaming centre needs: a window below its eye (with a margin, so digging and
+     * falling never outrun generation) and a smaller one above, over the given columns, nearest
+     * first so content materializes around the player rather than at the fringes.
+     */
+    private void collectDesiredCubes(
+            ChunkPos centre, int eyeSection, int vert, List<ChunkPos> columns,
+            java.util.ArrayDeque<Long> out) {
+        int zoneTop = generator.bandMinSection() - 1;
+        // Below the player we stream deeper than above: digging/falling must never outrun
+        // generation, and pre-generating a margin below makes deep descents seamless.
+        int belowDist = vert + FALL_MARGIN_CUBES;
+        int yMax = Math.min(eyeSection + vert, zoneTop);
+        int yMin = Math.max(eyeSection - belowDist, state.minSection());
+        if (yMin > yMax) {
+            return;
+        }
+        final int yMinF = yMin;
+        final int yMaxF = yMax;
+        final int eyeF = eyeSection;
+        final int belowDistF = belowDist;
+        final int vertF = vert;
+        // Nearest columns first so cubes materialize around the player, not at the fringes.
+        columns.sort((a, b) -> Double.compare(distanceSq(centre, a), distanceSq(centre, b)));
+        int near = CubicConfig.STREAM_NEAR_RADIUS.get();
+        int far = CubicConfig.STREAM_FAR_CUBES.get();
+        for (ChunkPos colPos : columns) {
+            int away = Math.max(Math.abs(colPos.x() - centre.x()), Math.abs(colPos.z() - centre.z()));
+            // Only the columns a player is digging in get a deep vertical window. Out at the edge of
+            // the view, the layer the player is standing in is all that can be seen - and each cube
+            // there would cost another whole-column save and packet, both of which grow with depth.
+            int below = away <= near ? belowDistF : far;
+            int above = away <= near ? vertF : far;
+            // Ordered as contiguous vertical runs - first down from the eye, then up. A run of
+            // neighbouring cubes in one column is filled with a single noise graph (consumeRun),
+            // which is what makes building that graph once per column instead of once per cube.
+            for (int dy = 0; dy <= below; dy++) {
+                int lower = eyeF - dy;
+                if (lower >= yMinF && lower <= yMaxF) {
+                    out.addLast(SectionPos.asLong(colPos.x(), lower, colPos.z()));
+                }
+            }
+            for (int dy = 1; dy <= above; dy++) {
+                int higher = eyeF + dy;
+                if (higher >= yMinF && higher <= yMaxF) {
+                    out.addLast(SectionPos.asLong(colPos.x(), higher, colPos.z()));
                 }
             }
         }
@@ -513,6 +903,17 @@ public final class ExtensionCubeManager {
         return true;
     }
 
+    /*
+     * Tried and rejected, measured: filling a run of neighbouring cubes of one column with a single
+     * NoiseChunk (ExtensionGenerator#generateWindow, still used by generateCube with count 1) cut
+     * generation from 3.3 ms to 2.0-2.1 ms per cube - building the noise graph costs 1.7 ms of the
+     * per-cube cost, and amortizing it over a run is where that time goes. It was reverted because
+     * a 224-block settings window does not produce the same density as a 16-block one: verification
+     * came back with whole sections of air below the band, which is exactly the failure mode the
+     * extension must not have. Revisiting this needs a window that reproduces the per-cube density
+     * result, not simply a taller one.
+     */
+
     // ---------------------------------------------------------------- cube generation
 
     /**
@@ -537,8 +938,38 @@ public final class ExtensionCubeManager {
             net.minecraft.world.level.block.Blocks.LAVA);
 
     /** Installs the freshly generated cube section, preserving foreign blocks from the old one. */
-    private void generateAndApply(LevelChunk chunk, int idx, int sectionY, LevelChunkSection previous) {
-        LevelChunkSection section = generator.generateCube(chunk, sectionY);
+    private void generateAndApply(
+            LevelChunk chunk, int idx, int sectionY, LevelChunkSection previous) {
+        generateAndApply(chunk, idx, sectionY, previous, null, 0L);
+    }
+
+    /**
+     * Installs a cube into its column and runs the passes that belong to a cube: the surgical merge
+     * over any terrain already there, the feature passes, structure pieces, lighting and the
+     * persisted marker.
+     *
+     * @param pregenerated a cube built by a batched {@code generateWindow} call, or null to build
+     *     this cube's noise graph on its own
+     * @param noiseNanos  the share of that batch's construction attributed to this cube, for the
+     *     cost profile only
+     */
+    private void generateAndApply(
+            LevelChunk chunk, int idx, int sectionY, LevelChunkSection previous,
+            LevelChunkSection pregenerated, long noiseNanos) {
+        final int stratum = this.profileCost ? stratumOf(sectionY) : -1;
+        this.profileStratum = stratum;
+        this.generator.setProfileStratum(stratum);
+        long phaseStart = System.nanoTime();
+        LevelChunkSection section = pregenerated != null
+                ? pregenerated
+                : generator.generateCube(chunk, sectionY);
+        if (pregenerated != null) {
+            addPhase(PHASE_NOISE, stratum, noiseNanos);
+        } else {
+            markPhase(PHASE_NOISE, stratum, phaseStart);
+        }
+
+        phaseStart = System.nanoTime();
         if (previous != null) {
             for (int x = 0; x < 16; x++) {
                 for (int y = 0; y < 16; y++) {
@@ -552,22 +983,32 @@ public final class ExtensionCubeManager {
             }
         }
         chunk.getSections()[idx] = section;
-        chunk.markUnsaved();
+        noteColumnChanged(chunk.getPos());
+        markPhase(PHASE_MERGE, stratum, phaseStart);
 
         // Features always run: the cube's own (deep, remapped) biome drives its feature set.
+        phaseStart = System.nanoTime();
         Holder<Biome> cubeBiome = section.getBiomes().get(1, 1, 1);
         placeCubeFeatures(chunk, section, sectionY, cubeBiome);
+        markPhase(PHASE_FEATURES, stratum, phaseStart);
 
         // Deep structure pieces (registered by DeepStructures) re-place themselves into the fresh
         // section, including their interior air - terrain regen alone would fill rooms solid.
+        phaseStart = System.nanoTime();
         placeStructurePieces(chunk, sectionY);
+        markPhase(PHASE_STRUCTURES, stratum, phaseStart);
 
+        phaseStart = System.nanoTime();
         SectionPos sectionPos = SectionPos.of(chunk.getPos(), sectionY);
         // notify the light engine: new non-empty (or emptier) section
         level.getChunkSource().getLightEngine().updateSectionStatus(sectionPos, section.hasOnlyAir());
 
-        markResend(chunk.getPos());
         persistGeneratedMarker(chunk.getPos(), chunk);
+        markPhase(PHASE_TAIL, stratum, phaseStart);
+        if (stratum >= 0) {
+            this.profileCubes[stratum]++;
+        }
+        this.profileStratum = -1;
     }
 
     /**
@@ -659,6 +1100,96 @@ public final class ExtensionCubeManager {
         return index;
     }
 
+    /**
+     * Feature passes already evaluated for the column currently being worked on, keyed by
+     * (generation step, index in that step, tile of the feature's native span).
+     *
+     * <p>Evaluating a placement chain is the whole cost of a feature pass, and a pass scatters its
+     * positions over the feature's full span - so running it again for every 16-block cube of that
+     * span means each pass is evaluated a score of times to keep the handful of positions that fall
+     * in each cube. Cubes of one column overlap the same tiles, so a pass is evaluated once and its
+     * positions are packed (x/z as offsets from the column corner, Y relative to the tile) for the
+     * cubes to read. Positions are a function of (column, feature, tile) alone, and each placement
+     * gets its own seeded random, so a cube's contents never depend on which cube came first.
+     */
+    private final Map<Long, long[]> featureTilePasses = new HashMap<>();
+    private long featureCacheColumn = Long.MIN_VALUE;
+    /** Debug: a stand-in viewer for benchmarks, so the watched/near rules behave as they do in play. */
+    private ChunkPos benchViewer;
+    private net.minecraft.resources.Identifier featureCacheBiome = null;
+    private long profileFeatureEvals;
+    private boolean warnedFeaturePassTooWide;
+
+    /** The feature cache belongs to one column and one biome; anything else starts a new one. */
+    private void useFeatureCacheFor(ChunkPos chunkPos, Holder<Biome> cubeBiome) {
+        net.minecraft.resources.Identifier biome = cubeBiome.unwrapKey()
+                .map(k -> k.identifier())
+                .orElse(null);
+        long column = chunkPos.pack();
+        if (column != this.featureCacheColumn
+                || !java.util.Objects.equals(biome, this.featureCacheBiome)) {
+            this.featureCacheColumn = column;
+            this.featureCacheBiome = biome;
+            this.featureTilePasses.clear();
+        }
+    }
+
+    /**
+     * One band-pass of a feature over one tile of its native span: the positions it scatters, packed
+     * for the cubes of this column to read, or null if a position fell outside what the packing can
+     * hold (which vanilla placement chains do not produce in practice).
+     */
+    private long[] evaluateFeatureTile(
+            Holder<PlacedFeature> holder, PlacedFeature placed, CubeGenAccess access, ChunkGenerator gen,
+            PlacementContext context, ChunkPos chunkPos, int tile, int tileBase, int span,
+            double multiplier, long featureSeed) {
+        RandomSource rand = RandomSource.create(featureSeed ^ (tile * 0x9E3779B97F4A7C15L));
+        Stream<BlockPos> stream = Stream.of(new BlockPos(
+                chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ()));
+        java.util.ArrayList<Long> out = new java.util.ArrayList<>();
+        WorldGenState.CURRENT_MULTIPLIER.set(multiplier);
+        try {
+            for (PlacementModifier modifier : placed.placement()) {
+                stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
+            }
+            stream.forEach(pos -> {
+                int y = pos.getY() - tile * span;
+                if (y < state.minY() + FEATURE_FLOOR_MARGIN || y >= generator.bandMinY()) {
+                    return;
+                }
+                int relY = y - tileBase;
+                int xOff = pos.getX() - chunkPos.getMinBlockX();
+                int zOff = pos.getZ() - chunkPos.getMinBlockZ();
+                if (relY < 0 || relY > 0xFFFFFL || xOff < -1024 || xOff > 1023
+                        || zOff < -1024 || zOff > 1023) {
+                    if (!this.warnedFeaturePassTooWide) {
+                        this.warnedFeaturePassTooWide = true;
+                        CubicChunks.LOGGER.warn(
+                                "[CubicChunks] a feature pass reached further than the tile cache can"
+                                        + " hold ({}); later passes of this shape are skipped",
+                                holder.unwrapKey().map(k -> k.identifier().toString()).orElse("?"));
+                    }
+                    return;
+                }
+                out.add(((long) relY << 22) | ((zOff & 0x7FFL) << 11) | (xOff & 0x7FFL));
+            });
+        } catch (Throwable t2) {
+            if (complainedFeatureFailures.add(placed.getClass())) {
+                CubicChunks.LOGGER.warn(
+                        "[CubicChunks] deep feature planning failed (suppressing repeats): {}",
+                        t2.toString());
+            }
+            return null;
+        } finally {
+            WorldGenState.CURRENT_MULTIPLIER.set(1.0);
+        }
+        long[] packed = new long[out.size()];
+        for (int i = 0; i < packed.length; i++) {
+            packed[i] = out.get(i);
+        }
+        return packed;
+    }
+
     private long indexedColumn = Long.MIN_VALUE;
     private Map<Integer, java.util.List<StructurePiece>> pieceIndex = java.util.Map.of();
 
@@ -671,12 +1202,16 @@ public final class ExtensionCubeManager {
         return pieceAccess;
     }
 
-    private void markResend(ChunkPos pos) {
-        resendQueue.add(pos);
-    }
-
     /** Extra cubes streamed below each player's eye, so descents never outrun generation. */
     private static final int FALL_MARGIN_CUBES = 4;
+
+    /**
+     * How far above the world bottom feature anchors are kept. A feature's own blob extends several
+     * blocks around its anchor, and a block written below the bottom of the level lands outside the
+     * light engine's section range - which makes its light updates walk into sections the engine
+     * has no data for and fails inside them.
+     */
+    private static final int FEATURE_FLOOR_MARGIN = 16;
 
     /**
      * Guarantee: the cube directly below each player's feet always exists (unless the player's
@@ -704,33 +1239,107 @@ public final class ExtensionCubeManager {
         }
     }
 
-    private void flushResends() {
-        if (resendQueue.isEmpty()) {
+    private void noteColumnChanged(ChunkPos pos) {
+        long column = pos.pack();
+        columnLastTouched.put(column, level.getGameTime());
+        pendingSave.add(column);
+        pendingSend.add(column);
+    }
+
+    /**
+     * Hand columns back to vanilla once they stop changing: mark them unsaved so the normal save
+     * path serialises them once, and refresh tracking clients with one chunk packet per column.
+     * Columns a player is standing in (or within {@link #NEAR_COLUMNS} of) go out immediately so
+     * nothing the player can fall into is ever withheld; the rest wait for a quiet period.
+     */
+    private void flushColumnWork(boolean force) {
+        if (pendingSave.isEmpty() && pendingSend.isEmpty()) {
             return;
         }
+        int now = (int) level.getGameTime();
+        List<ServerPlayer> players = level.getPlayers(p -> true);
         var lightEngine = level.getChunkSource().getLightEngine();
-        List<ServerPlayer> players = null;
-        int budget = MAX_RESENDS_PER_TICK;
-        java.util.Iterator<ChunkPos> it = resendQueue.iterator();
-        while (it.hasNext() && budget > 0) {
-            ChunkPos cp = it.next();
-            it.remove();
+        int sendBudget = MAX_RESENDS_PER_TICK;
+        for (long column : pendingSave.toLongArray()) {
+            ChunkPos cp = ChunkPos.unpack(column);
             LevelChunk chunk = level.getChunkSource().getChunkNow(cp.x(), cp.z());
             if (chunk == null) {
+                // unloaded out from under us: hand it to vanilla so nothing is lost
+                pendingSave.remove(column);
+                pendingSend.remove(column);
+                columnLastTouched.remove(column);
                 continue;
             }
-            budget--;
-            ClientboundLevelChunkWithLightPacket packet =
-                    new ClientboundLevelChunkWithLightPacket(chunk, lightEngine, null, null);
-            if (players == null) {
-                players = level.getPlayers(p -> true);
-            }
-            for (ServerPlayer player : players) {
-                if (player.getChunkTrackingView().contains(cp)) {
-                    player.connection.send(packet);
-                }
+            long lastTouched = columnLastTouched.getOrDefault(column, now);
+            // No player has this column in view any more: it is on its way out of the level, so
+            // hand it to the save path now rather than holding it back.
+            boolean watched = !trackableView(players, cp).isEmpty() || isBenchViewed(cp);
+            boolean due = force || !watched
+                    || now - lastTouched >= SAVE_QUIET_TICKS
+                    || now - lastTouched > WORK_DEFER_LIMIT_TICKS;
+            if (due) {
+                chunk.markUnsaved();
+                pendingSave.remove(column);
+                this.profileSaveMarks++;
             }
         }
+
+        for (long column : pendingSend.toLongArray()) {
+            ChunkPos cp = ChunkPos.unpack(column);
+            if (!pendingSave.contains(column) && !force && sendBudget <= 0) {
+                continue; // keep whole-column refreshes bounded per tick
+            }
+            long lastTouched = columnLastTouched.getOrDefault(column, now);
+            boolean quiet = now - lastTouched >= SEND_QUIET_TICKS;
+            if (!force && !quiet && !isNearPlayer(players, cp)) {
+                continue; // far columns are refreshed when their generation settles, not per cube
+            }
+            LevelChunk chunk = level.getChunkSource().getChunkNow(cp.x(), cp.z());
+            if (chunk == null) {
+                pendingSend.remove(column);
+                continue;
+            }
+            java.util.List<ServerPlayer> tracking = trackableView(players, cp);
+            if (tracking.isEmpty()) {
+                pendingSend.remove(column); // nobody can see it; vanilla sends it when they can
+                continue;
+            }
+            sendBudget--;
+            pendingSend.remove(column);
+            this.profileSends++;
+            ClientboundLevelChunkWithLightPacket packet =
+                    new ClientboundLevelChunkWithLightPacket(chunk, lightEngine, null, null);
+            for (ServerPlayer player : tracking) {
+                player.connection.send(packet);
+            }
+        }
+    }
+
+    private boolean isBenchViewed(ChunkPos pos) {
+        return benchViewer != null
+                && Math.max(Math.abs(benchViewer.x() - pos.x()), Math.abs(benchViewer.z() - pos.z()))
+                <= CubicConfig.STREAM_NEAR_RADIUS.get();
+    }
+
+    private static boolean isNearPlayer(List<ServerPlayer> players, ChunkPos pos) {
+        int near = CubicConfig.STREAM_NEAR_RADIUS.get();
+        for (ServerPlayer player : players) {
+            ChunkPos centre = player.chunkPosition();
+            if (Math.max(Math.abs(centre.x() - pos.x()), Math.abs(centre.z() - pos.z())) <= near) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<ServerPlayer> trackableView(List<ServerPlayer> players, ChunkPos pos) {
+        List<ServerPlayer> out = new ArrayList<>(2);
+        for (ServerPlayer player : players) {
+            if (player.getChunkTrackingView().contains(pos)) {
+                out.add(player);
+            }
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------- feature plumbing (called from CubeGenAccess)
@@ -748,10 +1357,8 @@ public final class ExtensionCubeManager {
         // 26.x places ore blobs straight into the section it acquires (BulkSectionAccess), so the
         // write never passes through setBlock: flag the owning column here, or the feature blocks
         // would neither be saved nor re-sent to clients.
-        LevelChunk target = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
-        if (target != null) {
-            target.markUnsaved();
-            markResend(target.getPos());
+        if (generated.contains(SectionPos.asLong(pos.getX() >> 4, cubeY, pos.getZ() >> 4))) {
+            noteColumnChanged(new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4));
         }
         return true;
     }
@@ -783,8 +1390,7 @@ public final class ExtensionCubeManager {
                 chunk.setBlockEntity(blockEntity);
             }
         }
-        chunk.markUnsaved();
-        markResend(chunk.getPos());
+        noteColumnChanged(chunk.getPos());
         return true;
     }
 
@@ -813,6 +1419,7 @@ public final class ExtensionCubeManager {
         long seed = level.getSeed();
         double bonus = CubicConfig.ORE_DEPTH_BONUS.get();
 
+        useFeatureCacheFor(chunkPos, cubeBiome);
         List<net.minecraft.core.HolderSet<PlacedFeature>> steps = cubeBiome.value().getGenerationSettings().features();
         int stepIndex = 0;
         for (net.minecraft.core.HolderSet<PlacedFeature> stepFeatures : steps) {
@@ -830,7 +1437,7 @@ public final class ExtensionCubeManager {
                 }
                 try {
                     PlacementContext context = new PlacementContext(access, gen, Optional.of(placed));
-                    long featureSeed = seed + chunkPos.pack() + sectionY * 1000003587L
+                    long featureSeed = seed + chunkPos.pack()
                             + stepIndex * 10000019L + innerIndex * 34187003L;
 
                     // the feature's native span is a property of its placement chain only - measure
@@ -862,45 +1469,66 @@ public final class ExtensionCubeManager {
                     // the native span would therefore multiply density by band height / span. Scale
                     // the count back by that ratio so depth starts at band density, then grow it per
                     // stratum below the band (oreDepthBonusPerStratum).
-                    int stratum = Math.max(0,
-                            Math.floorDiv(generator.bandMinY() - cubeMaxY, generator.stratumHeight()));
+                    // Density comes from the tile, not from the cube that happened to ask for it
+                    // first: the count of a pass is scaled by which stratum that tile covers, so ore
+                    // density rises with depth as configured while staying independent of the order
+                    // the cubes of a column are generated in.
                     double scale = (double) span / (double) generator.stratumHeight();
-                    double multiplier = scale * (1.0 + stratum * bonus);
                     for (int tile = tMin; tile <= tMax; tile++) {
-                        RandomSource rand = RandomSource.create(featureSeed ^ (tile * 0x9E3779B97F4A7C15L));
-                        Stream<BlockPos> stream =
-                                Stream.of(new BlockPos(chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ()));
-                        WorldGenState.CURRENT_MULTIPLIER.set(multiplier);
-                        try {
-                            for (PlacementModifier modifier : placed.placement()) {
-                                stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
+                        int tileBase = vmin - tile * span;
+                        int stratum = Math.max(0, Math.floorDiv(
+                                generator.bandMinY() - (tileBase + span), generator.stratumHeight()));
+                        double multiplier = scale * (1.0 + stratum * bonus);
+                        long key = ((long) stepIndex << 45) | ((long) innerIndex << 36)
+                                | (tile & 0xffffffffL);
+                        long[] pass = this.featureTilePasses.get(key);
+                        if (pass == null) {
+                            pass = evaluateFeatureTile(holder, placed, access, gen, context, chunkPos,
+                                    tile, tileBase, span, multiplier, featureSeed);
+                            this.profileFeatureEvals++;
+                            if (pass != null) {
+                                this.featureTilePasses.put(key, pass);
                             }
-                            final int shift = tile * span;
-                            stream.filter(pos -> {
-                                int y = pos.getY() - shift;
-                                return y >= cubeMinY && y < cubeMaxY && y >= state.minY()
-                                        && y < generator.bandMinY();
-                            }).forEach(pos -> {
-                                BlockPos target = pos.offset(0, -shift, 0);
-                                try {
-                                    holder.value().feature().value().place(access, gen, rand, target);
-                                } catch (Throwable t) {
-                                    if (complainedFeatureFailures.add(
-                                            holder.value().feature().value().getClass())) {
-                                        CubicChunks.LOGGER.warn(
-                                                "[CubicChunks] deep feature placement failed (suppressing repeats): {}",
-                                                t.toString());
-                                    }
+                        }
+                        if (pass == null) {
+                            continue;
+                        }
+                        long placedHere = 0;
+                        for (int i = 0; i < pass.length; i++) {
+                            long packed = pass[i];
+                            int xOff = (int) (packed & 0x7FFL);
+                            if ((xOff & 0x400) != 0) {
+                                xOff -= 0x800;
+                            }
+                            int zOff = (int) ((packed >> 11) & 0x7FFL);
+                            if ((zOff & 0x400) != 0) {
+                                zOff -= 0x800;
+                            }
+                            int y = tileBase + (int) (packed >> 22);
+                            if (this.profileStratum >= 0) {
+                                this.profileCandidates[this.profileStratum]++;
+                            }
+                            if (y < cubeMinY || y >= cubeMaxY) {
+                                continue;
+                            }
+                            BlockPos target = new BlockPos(
+                                    chunkPos.getMinBlockX() + xOff, y, chunkPos.getMinBlockZ() + zOff);
+                            RandomSource placeRandom = RandomSource.create(featureSeed
+                                    ^ (tile * 0x9E3779B97F4A7C15L) ^ (i * 0x2545F4914F6CDD1DL));
+                            try {
+                                holder.value().feature().value().place(access, gen, placeRandom, target);
+                                placedHere++;
+                            } catch (Throwable e) {
+                                if (complainedFeatureFailures.add(
+                                        holder.value().feature().value().getClass())) {
+                                    CubicChunks.LOGGER.warn(
+                                            "[CubicChunks] deep feature placement failed (suppressing repeats): {}",
+                                            e.toString());
                                 }
-                            });
-                        } catch (Throwable t) {
-                            if (complainedFeatureFailures.add(placed.getClass())) {
-                                CubicChunks.LOGGER.warn(
-                                        "[CubicChunks] deep feature planning failed (suppressing repeats): {}",
-                                        t.toString());
                             }
-                        } finally {
-                            WorldGenState.CURRENT_MULTIPLIER.set(1.0);
+                        }
+                        if (this.profileStratum >= 0) {
+                            this.profilePlaced[this.profileStratum] += placedHere;
                         }
                     }
                 } catch (Throwable t) {
