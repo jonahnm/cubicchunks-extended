@@ -4,7 +4,7 @@ license = "MIT"
 
 [[mods]]
 modId = "cubicchunks"
-version = "0.2.2"
+version = "0.2.3"
 displayName = "Cubic Chunks Extended"
 authors = "Cubic Chunks Extended contributors"
 description = '''

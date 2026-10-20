@@ -680,7 +680,8 @@ public final class ExtensionCubeManager {
             if (chunk == null) {
                 continue;
             }
-            for (int sy = generator.bandMinSection() - 1; sy >= state.minSection(); sy--) {
+            for (int sy = net.minecraft.core.SectionPos.blockToSectionCoord(generator.bandMaxY()) - 1;
+                    sy >= state.minSection(); sy--) {
                 long key = SectionPos.asLong(pos.x(), sy, pos.z());
                 if (!generated.contains(key)) {
                     continue;
@@ -1135,6 +1136,8 @@ public final class ExtensionCubeManager {
 
     /** Debug: per-feature tallies of what the deep-world placement pipeline actually did. */
     private final Map<String, long[]> featureStats = new java.util.LinkedHashMap<>();
+    /** Per feature: measured reach (vmin, span), tiles seen, count multiplier seen, attempts/cube. */
+    private final Map<String, long[]> featureReach = new java.util.LinkedHashMap<>();
     private final Map<String, String> featureNotes = new java.util.LinkedHashMap<>();
 
     private void recordFeatureStat(
@@ -1146,6 +1149,17 @@ public final class ExtensionCubeManager {
         long[] stats = this.featureStats.computeIfAbsent(id, k -> new long[3]);
         stats[0] += positions;
         stats[1] += placements;
+    }
+
+    private void recordFeatureReach(Holder<PlacedFeature> holder, int vmin, int span, int tiles, double multiplier) {
+        if (!this.profileCost) {
+            return;
+        }
+        long[] r = this.featureReach.computeIfAbsent(featureId(holder), k -> new long[4]);
+        r[0] = vmin;
+        r[1] = span;
+        r[2] = Math.max(r[2], tiles);
+        r[3] = (long) (multiplier * 1000.0);
     }
 
     private void recordFeatureNote(Holder<PlacedFeature> holder, String note) {
@@ -1183,6 +1197,14 @@ public final class ExtensionCubeManager {
                         (a, b) -> Long.compare(a[0] + a[1], b[0] + b[1])).reversed())
                 .forEach(e -> CubicChunks.LOGGER.info("[CubicChunks]   {} : positions {}, placements {}",
                         e.getKey(), e.getValue()[0], e.getValue()[1]));
+        this.featureStats.forEach((id, stats) -> {
+            long[] r = this.featureReach.get(id);
+            if (r != null) {
+                CubicChunks.LOGGER.info(
+                        "[CubicChunks]   {} : reach y {}..{} (span {}), tiles per cube {}, count multiplier {}",
+                        id, r[0], r[0] + r[1], r[1], r[2], r[3] / 1000.0);
+            }
+        });
         this.featureStats.entrySet().stream()
                 .filter(e -> e.getValue()[1] == 0L)
                 .forEach(e -> CubicChunks.LOGGER.info("[CubicChunks]   {} : {} (positions read {}, considered by {} cubes)",
@@ -1198,6 +1220,7 @@ public final class ExtensionCubeManager {
         int stratumHeight = Math.max(16, generator.stratumHeight());
         java.util.Map<Integer, java.util.Map<String, Long>> census = new java.util.TreeMap<>();
         java.util.Map<Integer, Long> scanned = new java.util.TreeMap<>();
+        java.util.Map<Integer, Long> air = new java.util.TreeMap<>();
         for (ChunkPos pos : positions) {
             LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
             if (chunk == null) {
@@ -1211,15 +1234,21 @@ public final class ExtensionCubeManager {
                 if (idx < 0 || idx >= chunk.getSections().length) {
                     continue;
                 }
+                int bucket = sy >= generator.bandMinSection() ? -1 : stratumOf(sy);
                 java.util.Map<String, Long> tally =
-                        census.computeIfAbsent(stratumOf(sy), s -> new java.util.HashMap<>());
-                scanned.merge(stratumOf(sy), 4096L, Long::sum);
+                        census.computeIfAbsent(bucket, s -> new java.util.HashMap<>());
+                scanned.merge(bucket, 4096L, Long::sum);
+                final int sectionY = sy;
                 chunk.getSections()[idx].getStates().count((state, count) -> {
                     net.minecraft.resources.Identifier id = net.minecraft.core.registries
                             .BuiltInRegistries.BLOCK.getKey(state.getBlock());
                     String name = id == null ? "?" : id.getPath();
-                    if (name.equals("air") || name.equals("deepslate") || name.equals("stone")
-                            || name.equals("bedrock")) {
+                    if (name.equals("air")) {
+                        air.merge(sectionY >= generator.bandMinSection() ? -1 : stratumOf(sectionY),
+                                (long) count, Long::sum);
+                        return;
+                    }
+                    if (name.equals("deepslate") || name.equals("stone") || name.equals("bedrock")) {
                         return;
                     }
                     tally.merge(name, (long) count, Long::sum);
@@ -1228,7 +1257,9 @@ public final class ExtensionCubeManager {
         }
         for (java.util.Map.Entry<Integer, java.util.Map<String, Long>> stratum : census.entrySet()) {
             long blocks = Math.max(1L, scanned.getOrDefault(stratum.getKey(), 1L));
-            int topY = generator.bandMinY() - stratum.getKey() * stratumHeight;
+            int topY = stratum.getKey() < 0
+                    ? generator.bandMaxY()
+                    : generator.bandMinY() - stratum.getKey() * stratumHeight;
             String top = stratum.getValue().entrySet().stream()
                     .sorted(java.util.Map.Entry.<String, Long>comparingByValue().reversed())
                     .limit(14)
@@ -1237,8 +1268,10 @@ public final class ExtensionCubeManager {
                             1000.0 * e.getValue() / (double) blocks) + " per 1k)")
                     .reduce((a, b) -> a + ", " + b)
                     .orElse("-");
-            CubicChunks.LOGGER.info("[CubicChunks] census y {}..{} over {} blocks: {}",
-                    topY - stratumHeight, topY, blocks, top);
+            CubicChunks.LOGGER.info("[CubicChunks] census y {}..{} over {} blocks: air {} per 1k; {}",
+                    topY - stratumHeight, topY, blocks,
+                    String.format(java.util.Locale.ROOT, "%.1f",
+                            1000.0 * air.getOrDefault(stratum.getKey(), 0L) / (double) blocks), top);
         }
     }
 
@@ -1279,7 +1312,11 @@ public final class ExtensionCubeManager {
      */
     private static boolean isOreOrDiskFeature(Holder<PlacedFeature> holder) {
         String type = holder.value().feature().value().getClass().getSimpleName();
-        return type.contains("Ore") || type.contains("Disk") || type.contains("Spring");
+        // Geodes replace a whole volume around their position (their shell is tuff and calcite), so
+        // force-placing one per cube turns the deep world into a wall of geode shell and plugs the
+        // caves. Rarity-gated geodes are tiled by the normal path instead.
+        return type.contains("Ore") || type.contains("Disk") || type.contains("Spring")
+                || type.contains("Geode");
     }
 
     private static final int IN_CUBE_FALLBACK_ATTEMPTS = 2;
@@ -1732,6 +1769,7 @@ public final class ExtensionCubeManager {
                     // density rises with depth as configured while staying independent of the order
                     // the cubes of a column are generated in.
                     double scale = (double) span / (double) generator.stratumHeight();
+                    recordFeatureReach(holder, vmin, span, tMax - tMin + 1, scale);
                     for (int tile = tMin; tile <= tMax; tile++) {
                         int tileBase = vmin - tile * span;
                         int stratum = Math.max(0, Math.floorDiv(
@@ -1870,17 +1908,24 @@ public final class ExtensionCubeManager {
                     continue;
                 }
                 heightAnchored = true;
-                modifier.getPositions(context, rand, base)
-                        .limit(REACH_SAMPLES)
-                        .forEach(pos -> {
-                            int y = pos.getY();
-                            if (y < bounds[0]) {
-                                bounds[0] = y;
-                            }
-                            if (y > bounds[1]) {
-                                bounds[1] = y;
-                            }
-                        });
+                // HeightRangePlacement rewrites the incoming Y and returns a single position, so
+                // one call is one sample of the provider. Asking it for 4096 positions in one go
+                // measured the provider once and reported a reach of 16 blocks for every feature,
+                // which broke the tiling period, the count multiplier and - with the in-cube
+                // fallback - put a geode in every cube.
+                for (int sample = 0; sample < REACH_SAMPLES; sample++) {
+                    BlockPos sampled = modifier.getPositions(context, rand, base).findFirst().orElse(null);
+                    if (sampled == null) {
+                        break;
+                    }
+                    int y = sampled.getY();
+                    if (y < bounds[0]) {
+                        bounds[0] = y;
+                    }
+                    if (y > bounds[1]) {
+                        bounds[1] = y;
+                    }
+                }
             }
         } finally {
             WorldGenState.CURRENT_MULTIPLIER.set(1.0);
