@@ -454,6 +454,8 @@ public final class ExtensionCubeManager {
         }
         this.benchViewer = null;
         logCostProfile();
+        debugReportFeatureStats();
+        debugReportBlockCensus(columns);
         debugColumnSaveBreakdown(spawn);
         debugReportBiomeProfile(columns);
         debugReportCubeComposition(spawn);
@@ -587,12 +589,23 @@ public final class ExtensionCubeManager {
         return String.format(java.util.Locale.ROOT, "%.1f", (double) nanos / 1_000_000.0 / (double) Math.max(1L, count));
     }
 
+    private static boolean hasHeightmapPlacement(PlacedFeature placed) {
+        for (PlacementModifier modifier : placed.placement()) {
+            if (modifier instanceof HeightmapPlacement) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void resetCostProfile() {
         java.util.Arrays.fill(this.profileNanos, 0L);
         java.util.Arrays.fill(this.profileCubes, 0L);
         java.util.Arrays.fill(this.profileCandidates, 0L);
         java.util.Arrays.fill(this.profilePlaced, 0L);
         this.profileFeatureEvals = 0L;
+        this.featureStats.clear();
+        this.featureNotes.clear();
     }
 
     /** Debug: print the collected per-stratum generation cost profile. */
@@ -1120,6 +1133,108 @@ public final class ExtensionCubeManager {
     private long profileFeatureEvals;
     private boolean warnedFeaturePassTooWide;
 
+    /** Debug: per-feature tallies of what the deep-world placement pipeline actually did. */
+    private final Map<String, long[]> featureStats = new java.util.LinkedHashMap<>();
+    private final Map<String, String> featureNotes = new java.util.LinkedHashMap<>();
+
+    private void recordFeatureStat(
+            Holder<PlacedFeature> holder, long positions, long placements) {
+        if (!this.profileCost) {
+            return;
+        }
+        String id = featureId(holder);
+        long[] stats = this.featureStats.computeIfAbsent(id, k -> new long[3]);
+        stats[0] += positions;
+        stats[1] += placements;
+        if (positions > 0L || placements > 0L) {
+            this.featureNotes.put(id, "ran");
+        } else {
+            this.featureNotes.putIfAbsent(id, "evaluated, produced nothing");
+        }
+    }
+
+    private void recordFeatureSkipped(Holder<PlacedFeature> holder, String reason) {
+        if (!this.profileCost) {
+            return;
+        }
+        String id = featureId(holder);
+        long[] stats = this.featureStats.computeIfAbsent(id, k -> new long[3]);
+        stats[2]++;
+        if (!"ran".equals(this.featureNotes.get(id))) {
+            this.featureNotes.putIfAbsent(id, reason);
+        }
+    }
+
+    private static String featureId(Holder<PlacedFeature> holder) {
+        return holder.unwrapKey().map(k -> k.identifier().toString()).orElse("[unnamed]");
+    }
+
+    public void debugReportFeatureStats() {
+        CubicChunks.LOGGER.info("[CubicChunks] --- placement below the band, per feature"
+                + " (positions produced / placements attempted)");
+        this.featureStats.entrySet().stream()
+                .sorted(java.util.Map.Entry.<String, long[]>comparingByValue(
+                        (a, b) -> Long.compare(a[0] + a[1], b[0] + b[1])).reversed())
+                .forEach(e -> CubicChunks.LOGGER.info("[CubicChunks]   {} : positions {}, placements {}",
+                        e.getKey(), e.getValue()[0], e.getValue()[1]));
+        this.featureStats.entrySet().stream()
+                .filter(e -> e.getValue()[0] == 0L && e.getValue()[1] == 0L)
+                .forEach(e -> CubicChunks.LOGGER.info("[CubicChunks]   {} : {} ({} cubes considered it)",
+                        e.getKey(), this.featureNotes.getOrDefault(e.getKey(), "?"), e.getValue()[2]));
+    }
+
+    /**
+     * Debug: which block types actually appear at which depth in generated cubes, read straight from
+     * the section palettes. Answers "the rare ones don't show up" with a count instead of a guess.
+     */
+    public void debugReportBlockCensus(java.util.Collection<ChunkPos> positions) {
+        int stratumHeight = Math.max(16, generator.stratumHeight());
+        java.util.Map<Integer, java.util.Map<String, Long>> census = new java.util.TreeMap<>();
+        java.util.Map<Integer, Long> scanned = new java.util.TreeMap<>();
+        for (ChunkPos pos : positions) {
+            LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
+            if (chunk == null) {
+                continue;
+            }
+            for (int sy = generator.bandMinSection() - 1; sy >= state.minSection(); sy--) {
+                if (!generated.contains(SectionPos.asLong(pos.x(), sy, pos.z()))) {
+                    continue;
+                }
+                int idx = chunk.getSectionIndexFromSectionY(sy);
+                if (idx < 0 || idx >= chunk.getSections().length) {
+                    continue;
+                }
+                java.util.Map<String, Long> tally =
+                        census.computeIfAbsent(stratumOf(sy), s -> new java.util.HashMap<>());
+                scanned.merge(stratumOf(sy), 4096L, Long::sum);
+                chunk.getSections()[idx].getStates().count((state, count) -> {
+                    net.minecraft.resources.Identifier id = net.minecraft.core.registries
+                            .BuiltInRegistries.BLOCK.getKey(state.getBlock());
+                    String name = id == null ? "?" : id.getPath();
+                    if (name.equals("air") || name.equals("deepslate") || name.equals("stone")
+                            || name.equals("bedrock")) {
+                        return;
+                    }
+                    tally.merge(name, (long) count, Long::sum);
+                });
+            }
+        }
+        for (java.util.Map.Entry<Integer, java.util.Map<String, Long>> stratum : census.entrySet()) {
+            long blocks = Math.max(1L, scanned.getOrDefault(stratum.getKey(), 1L));
+            int topY = generator.bandMinY() - stratum.getKey() * stratumHeight;
+            String top = stratum.getValue().entrySet().stream()
+                    .sorted(java.util.Map.Entry.<String, Long>comparingByValue().reversed())
+                    .limit(14)
+                    .map(e -> e.getKey() + " x" + e.getValue()
+                            + " (" + String.format(java.util.Locale.ROOT, "%.3f",
+                            1000.0 * e.getValue() / (double) blocks) + " per 1k)")
+                    .reduce((a, b) -> a + ", " + b)
+                    .orElse("-");
+            CubicChunks.LOGGER.info("[CubicChunks] census y {}..{} over {} blocks: {}",
+                    topY - stratumHeight, topY, blocks, top);
+        }
+    }
+
     /** The feature cache belongs to one column and one biome; anything else starts a new one. */
     private void useFeatureCacheFor(ChunkPos chunkPos, Holder<Biome> cubeBiome) {
         net.minecraft.resources.Identifier biome = cubeBiome.unwrapKey()
@@ -1427,11 +1542,15 @@ public final class ExtensionCubeManager {
             for (Holder<PlacedFeature> holder : stepFeatures) {
                 PlacedFeature placed = holder.value();
                 if (!isStratumEligible(placed)) {
+                    recordFeatureSkipped(holder, hasHeightmapPlacement(placed)
+                            ? "skipped: anchored to the terrain surface (heightmap placement)"
+                            : "skipped: no height-range placement to tile");
                     innerIndex++;
                     continue;
                 }
                 // lava policy: vanilla lava springs must not place lava outside the near-floor zone
                 if (isLavaSpring(holder) && cubeMinY > lavaZoneTop()) {
+                    recordFeatureSkipped(holder, "skipped: lava policy (near-floor zone only)");
                     innerIndex++;
                     continue;
                 }
@@ -1450,6 +1569,7 @@ public final class ExtensionCubeManager {
                     }
                     int span = spanOfFeature.get(placed);
                     if (span == 0) {
+                        recordFeatureSkipped(holder, "skipped: its own range reaches nowhere below the band");
                         innerIndex++;
                         continue;
                     }
@@ -1462,6 +1582,7 @@ public final class ExtensionCubeManager {
                             Math.floorDiv(vmin + span - state.minY(), span));
                     int tMin = Math.max(0, Math.floorDiv(vmin - cubeMaxY, span) + 1);
                     if (tMin > tMax) {
+                        recordFeatureSkipped(holder, "skipped: no tile covers this cube");
                         innerIndex++;
                         continue;
                     }
@@ -1511,6 +1632,7 @@ public final class ExtensionCubeManager {
                             if (y < cubeMinY || y >= cubeMaxY) {
                                 continue;
                             }
+                            recordFeatureStat(holder, 0L, 1L);
                             BlockPos target = new BlockPos(
                                     chunkPos.getMinBlockX() + xOff, y, chunkPos.getMinBlockZ() + zOff);
                             RandomSource placeRandom = RandomSource.create(featureSeed
@@ -1558,24 +1680,50 @@ public final class ExtensionCubeManager {
     private long measureFeatureSpan(PlacedFeature placed, PlacementContext context, ChunkPos chunkPos) {
         int[] bounds = {Integer.MAX_VALUE, Integer.MIN_VALUE};
         RandomSource rand = RandomSource.create(0x5EEDF00DL);
-        Stream<BlockPos> stream = Stream.of(
-                new BlockPos(chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ()));
+        BlockPos base = new BlockPos(chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ());
+        boolean heightAnchored = false;
+        boolean everyLayer = false;
         WorldGenState.CURRENT_MULTIPLIER.set(32.0);
         try {
             for (PlacementModifier modifier : placed.placement()) {
-                stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
+                if (modifier instanceof net.minecraft.world.level.levelgen.placement.CountOnEveryLayerPlacement) {
+                    // This one iterates the build range itself; its reach is the whole band.
+                    everyLayer = true;
+                    continue;
+                }
+                if (!(modifier instanceof HeightRangePlacement)) {
+                    // Count, rarity, biome and environment filters decide *whether* and *how often*,
+                    // never how deep a feature can reach. Sampling the chain as a whole used to let
+                    // them decide: a 1-in-N rarity gate, or an environment scan looking for air in a
+                    // column that is not generated yet, produced no positions at all, the measurement
+                    // came back as "reaches nowhere", and the feature was then never tiled below the
+                    // band for the rest of the session. That is how rare ores - vanilla's large
+                    // diamonds, and every rarity-gated ore and geode added by other mods - vanished
+                    // from the deep world.
+                    continue;
+                }
+                heightAnchored = true;
+                modifier.getPositions(context, rand, base)
+                        .limit(REACH_SAMPLES)
+                        .forEach(pos -> {
+                            int y = pos.getY();
+                            if (y < bounds[0]) {
+                                bounds[0] = y;
+                            }
+                            if (y > bounds[1]) {
+                                bounds[1] = y;
+                            }
+                        });
             }
-            stream.forEach(pos -> {
-                int y = pos.getY();
-                if (y < bounds[0]) {
-                    bounds[0] = y;
-                }
-                if (y > bounds[1]) {
-                    bounds[1] = y;
-                }
-            });
         } finally {
             WorldGenState.CURRENT_MULTIPLIER.set(1.0);
+        }
+        if (everyLayer && !heightAnchored) {
+            bounds[0] = generator.bandMinY();
+            bounds[1] = generator.bandMinY() + generator.stratumHeight() - 1;
+        }
+        if (!heightAnchored && !everyLayer) {
+            return 0L;
         }
         int vmin = bounds[0];
         int vmax = bounds[1];
@@ -1597,14 +1745,22 @@ public final class ExtensionCubeManager {
                 .orElse(false);
     }
 
-    /** Underground features only: height-anchored placements, not surface/heightmap-anchored. */
+    /** How many samples a feature's height range is measured over (tails matter for tiling). */
+    private static final int REACH_SAMPLES = 4096;
+
+    /**
+     * Underground features only: those anchored to a height range (or to every layer of the build
+     * range). Features anchored to the terrain surface through a heightmap belong to the world's
+     * outer surface and are deliberately not repeated through the deep world.
+     */
     private static boolean isStratumEligible(PlacedFeature placed) {
         boolean anchored = false;
         for (PlacementModifier modifier : placed.placement()) {
             if (modifier instanceof HeightmapPlacement) {
                 return false;
             }
-            if (modifier instanceof HeightRangePlacement) {
+            if (modifier instanceof HeightRangePlacement
+                    || modifier instanceof net.minecraft.world.level.levelgen.placement.CountOnEveryLayerPlacement) {
                 anchored = true;
             }
         }

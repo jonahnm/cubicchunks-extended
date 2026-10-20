@@ -95,7 +95,8 @@ decoding (bounds are synced from the server at login; a stale client config is n
   each cube is regenerated and merged over the installed one, so only blocks vanilla generation
   could have produced are replaced; anything you placed stays, and structure interiors are re-placed
   rather than filled solid.
-- `/cubicchunks verify <y>` — diff one generated cube at `<y>` against the full-column
+- `/cubicchunks bench <columns radius> <toY>`: walks a synthetic descent and reports, per depth, what generation costs, how many columns were actually refreshed, the per-feature placement report (which features ran below the band, which were skipped and why) and a block census by depth.
+`/cubicchunks verify <y>` — diff one generated cube at `<y>` against the full-column
   reference (vanilla noise evaluated over the whole modded range).
 - `/cubicchunks verifyall <radius>` — diff *every* generated cube in that many columns around
   you, one column per tick; logs per-column mismatch histograms plus a bulk total. With
