@@ -1146,10 +1146,16 @@ public final class ExtensionCubeManager {
         long[] stats = this.featureStats.computeIfAbsent(id, k -> new long[3]);
         stats[0] += positions;
         stats[1] += placements;
-        if (positions > 0L || placements > 0L) {
-            this.featureNotes.put(id, "ran");
-        } else {
-            this.featureNotes.putIfAbsent(id, "evaluated, produced nothing");
+    }
+
+    private void recordFeatureNote(Holder<PlacedFeature> holder, String note) {
+        if (!this.profileCost) {
+            return;
+        }
+        String id = featureId(holder);
+        this.featureStats.computeIfAbsent(id, k -> new long[3]);
+        if (!"ran".equals(this.featureNotes.get(id))) {
+            this.featureNotes.put(id, note);
         }
     }
 
@@ -1178,9 +1184,10 @@ public final class ExtensionCubeManager {
                 .forEach(e -> CubicChunks.LOGGER.info("[CubicChunks]   {} : positions {}, placements {}",
                         e.getKey(), e.getValue()[0], e.getValue()[1]));
         this.featureStats.entrySet().stream()
-                .filter(e -> e.getValue()[0] == 0L && e.getValue()[1] == 0L)
-                .forEach(e -> CubicChunks.LOGGER.info("[CubicChunks]   {} : {} ({} cubes considered it)",
-                        e.getKey(), this.featureNotes.getOrDefault(e.getKey(), "?"), e.getValue()[2]));
+                .filter(e -> e.getValue()[1] == 0L)
+                .forEach(e -> CubicChunks.LOGGER.info("[CubicChunks]   {} : {} (positions read {}, considered by {} cubes)",
+                        e.getKey(), this.featureNotes.getOrDefault(e.getKey(), "?"),
+                        e.getValue()[0], e.getValue()[2]));
     }
 
     /**
@@ -1254,6 +1261,50 @@ public final class ExtensionCubeManager {
      * for the cubes of this column to read, or null if a position fell outside what the packing can
      * hold (which vanilla placement chains do not produce in practice).
      */
+    /**
+     * Runs a feature's placement chain for this cube only, and places what lands inside it. Used for
+     * features whose vertical anchoring cannot be resolved without the real world (terrain scans,
+     * surface-relative limits): a cached band-pass would silently drop exactly those.
+     */
+    private long runFeatureInPlace(
+            Holder<PlacedFeature> holder, PlacedFeature placed, CubeGenAccess access, ChunkGenerator gen,
+            PlacementContext context, ChunkPos chunkPos, long featureSeed, double multiplier,
+            int cubeMinY, int cubeMaxY) {
+        RandomSource rand = RandomSource.create(featureSeed);
+        Stream<BlockPos> stream = Stream.of(new BlockPos(
+                chunkPos.getMinBlockX(), generator.bandMinY(), chunkPos.getMinBlockZ()));
+        java.util.List<BlockPos> inside = new java.util.ArrayList<>();
+        WorldGenState.CURRENT_MULTIPLIER.set(multiplier);
+        try {
+            for (PlacementModifier modifier : placed.placement()) {
+                stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
+            }
+            stream.forEach(pos -> {
+                int y = pos.getY();
+                if (y >= cubeMinY && y < cubeMaxY) {
+                    inside.add(pos.immutable());
+                }
+            });
+        } finally {
+            WorldGenState.CURRENT_MULTIPLIER.set(1.0);
+        }
+        long placedCount = 0;
+        for (int i = 0; i < inside.size(); i++) {
+            try {
+                holder.value().feature().value().place(access, gen, RandomSource.create(featureSeed
+                        ^ (cubeMinY * 0x9E3779B97F4A7C15L) ^ (i * 0x2545F4914F6CDD1DL)), inside.get(i));
+                placedCount++;
+            } catch (Throwable e) {
+                if (complainedFeatureFailures.add(holder.value().feature().value().getClass())) {
+                    CubicChunks.LOGGER.warn(
+                            "[CubicChunks] deep feature placement failed (suppressing repeats): {}",
+                            e.toString());
+                }
+            }
+        }
+        return placedCount;
+    }
+
     private long[] evaluateFeatureTile(
             Holder<PlacedFeature> holder, PlacedFeature placed, CubeGenAccess access, ChunkGenerator gen,
             PlacementContext context, ChunkPos chunkPos, int tile, int tileBase, int span,
@@ -1554,6 +1605,8 @@ public final class ExtensionCubeManager {
                     innerIndex++;
                     continue;
                 }
+                long producedThisFeature = 0L;
+                long placedThisFeature = 0L;
                 try {
                     PlacementContext context = new PlacementContext(access, gen, Optional.of(placed));
                     long featureSeed = seed + chunkPos.pack()
@@ -1568,6 +1621,23 @@ public final class ExtensionCubeManager {
                         vminOfFeature.put(placed, (int) (measured >> 32));
                     }
                     int span = spanOfFeature.get(placed);
+                    if (span < 0) {
+                        // Not tileable: run it for this cube, which is what the pipeline did before
+                        // passes were cached, and keep only what lands inside this cube. The depth
+                        // bonus still applies, so these features get denser lower down like any other.
+                        int stratum = Math.max(0, Math.floorDiv(
+                                generator.bandMinY() - cubeMaxY, generator.stratumHeight()));
+                        long placedHere = runFeatureInPlace(holder, placed, access, gen, context,
+                                chunkPos, featureSeed, 1.0 + stratum * bonus, cubeMinY, cubeMaxY);
+                        recordFeatureNote(holder, placedHere > 0L ? "ran in place"
+                                : "ran in place, placed nothing here");
+                        recordFeatureStat(holder, 1L, placedHere);
+                        if (this.profileStratum >= 0) {
+                            this.profilePlaced[this.profileStratum] += placedHere;
+                        }
+                        innerIndex++;
+                        continue;
+                    }
                     if (span == 0) {
                         recordFeatureSkipped(holder, "skipped: its own range reaches nowhere below the band");
                         innerIndex++;
@@ -1615,6 +1685,7 @@ public final class ExtensionCubeManager {
                             continue;
                         }
                         long placedHere = 0;
+                        producedThisFeature += pass.length;
                         for (int i = 0; i < pass.length; i++) {
                             long packed = pass[i];
                             int xOff = (int) (packed & 0x7FFL);
@@ -1632,7 +1703,6 @@ public final class ExtensionCubeManager {
                             if (y < cubeMinY || y >= cubeMaxY) {
                                 continue;
                             }
-                            recordFeatureStat(holder, 0L, 1L);
                             BlockPos target = new BlockPos(
                                     chunkPos.getMinBlockX() + xOff, y, chunkPos.getMinBlockZ() + zOff);
                             RandomSource placeRandom = RandomSource.create(featureSeed
@@ -1649,6 +1719,7 @@ public final class ExtensionCubeManager {
                                 }
                             }
                         }
+                        placedThisFeature += placedHere;
                         if (this.profileStratum >= 0) {
                             this.profilePlaced[this.profileStratum] += placedHere;
                         }
@@ -1660,6 +1731,15 @@ public final class ExtensionCubeManager {
                                 t.toString());
                     }
                 }
+                if (producedThisFeature > 0L && placedThisFeature == 0L) {
+                    recordFeatureNote(holder,
+                            "produced positions in this column, but none fell inside this cube");
+                } else if (producedThisFeature > 0L) {
+                    recordFeatureNote(holder, "ran");
+                } else if (this.profileCost) {
+                    recordFeatureSkipped(holder, "its own height anchoring produced no position");
+                }
+                recordFeatureStat(holder, producedThisFeature, placedThisFeature);
                 innerIndex++;
             }
             stepIndex++;
@@ -1727,6 +1807,13 @@ public final class ExtensionCubeManager {
         }
         int vmin = bounds[0];
         int vmax = bounds[1];
+        if (vmax == Integer.MIN_VALUE && heightAnchored) {
+            // The feature anchors itself to something only the real world can answer - a scan
+            // through the terrain, or a height range expressed against a surface that does not exist
+            // for a synthetic base position. Its reach cannot be measured here, so it must be run
+            // in place per cube rather than tiled and cached.
+            return -1L;
+        }
         if (vmax < vmin || vmax < state.minY()) {
             return 0L;
         }
