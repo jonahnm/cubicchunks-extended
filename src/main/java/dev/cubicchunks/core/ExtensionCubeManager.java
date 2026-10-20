@@ -1266,6 +1266,73 @@ public final class ExtensionCubeManager {
      * features whose vertical anchoring cannot be resolved without the real world (terrain scans,
      * surface-relative limits): a cached band-pass would silently drop exactly those.
      */
+    /**
+     * Attempts per cube for the in-cube fallback, before the depth bonus is applied. Each attempt
+     * stands in for the share of a band pass that one 16-block cube would have kept, so density
+     * stays close to the tiled model rather than being invented from scratch.
+     */
+    /**
+     * Ore and deposit features are not force-placed by the in-cube fallback: their unresolvable
+     * variants (vanilla's ore_granite_upper and friends, whose targets are stone, which does not
+     * exist below the band) would be placed at a density nothing in the data supports, and their
+     * deepslate counterparts already run through the normal path.
+     */
+    private static boolean isOreOrDiskFeature(Holder<PlacedFeature> holder) {
+        String type = holder.value().feature().value().getClass().getSimpleName();
+        return type.contains("Ore") || type.contains("Disk") || type.contains("Spring");
+    }
+
+    private static final int IN_CUBE_FALLBACK_ATTEMPTS = 2;
+
+    /**
+     * Places a feature anchored to a spot chosen inside this cube, skipping the modifiers that only
+     * say how often and at which declared height (the cube position stands in for those) and keeping
+     * the ones that decide whether it actually fits: surface scans, world checks, offsets and biome.
+     */
+    private long runFeatureInCube(
+            Holder<PlacedFeature> holder, PlacedFeature placed, CubeGenAccess access, ChunkGenerator gen,
+            PlacementContext context, ChunkPos chunkPos, long featureSeed,
+            int cubeMinY, int cubeMaxY, int stratum) {
+        int attempts = (int) Math.max(1L, Math.round(IN_CUBE_FALLBACK_ATTEMPTS
+                * (1.0 + stratum * CubicConfig.ORE_DEPTH_BONUS.get())));
+        long placedCount = 0;
+        for (int a = 0; a < attempts; a++) {
+            RandomSource rnd = RandomSource.create(featureSeed
+                    ^ (cubeMinY * 0x9E3779B97F4A7C15L) ^ (a * 0x2545F4914F6CDD1DL));
+            BlockPos base = new BlockPos(
+                    chunkPos.getMinBlockX() + rnd.nextInt(16),
+                    cubeMinY + rnd.nextInt(16),
+                    chunkPos.getMinBlockZ() + rnd.nextInt(16));
+            Stream<BlockPos> stream = Stream.of(base);
+            try {
+                for (PlacementModifier modifier : placed.placement()) {
+                    if (modifier instanceof HeightRangePlacement
+                            || modifier instanceof net.minecraft.world.level.levelgen.placement.InSquarePlacement
+                            || modifier instanceof net.minecraft.world.level.levelgen.placement.CountPlacement) {
+                        continue;
+                    }
+                    stream = stream.flatMap(pos -> modifier.getPositions(context, rnd, pos));
+                }
+                java.util.Iterator<BlockPos> it = stream.iterator();
+                for (int n = 0; n < 8 && it.hasNext(); n++) {
+                    BlockPos pos = it.next();
+                    if (pos.getY() < state.minY() || pos.getY() >= generator.bandMinY()) {
+                        continue;
+                    }
+                    holder.value().feature().value().place(access, gen, rnd, pos);
+                    placedCount++;
+                }
+            } catch (Throwable e) {
+                if (complainedFeatureFailures.add(holder.value().feature().value().getClass())) {
+                    CubicChunks.LOGGER.warn(
+                            "[CubicChunks] in-cube feature placement failed (suppressing repeats): {}",
+                            e.toString());
+                }
+            }
+        }
+        return placedCount;
+    }
+
     private long runFeatureInPlace(
             Holder<PlacedFeature> holder, PlacedFeature placed, CubeGenAccess access, ChunkGenerator gen,
             PlacementContext context, ChunkPos chunkPos, long featureSeed, double multiplier,
@@ -1723,6 +1790,26 @@ public final class ExtensionCubeManager {
                         if (this.profileStratum >= 0) {
                             this.profilePlaced[this.profileStratum] += placedHere;
                         }
+                    }
+                    if (producedThisFeature == 0L && span > 0 && !isOreOrDiskFeature(holder)) {
+                        // Not one position from this feature's own band survived for this column, so
+                        // anchor it in the cube instead. Note this is keyed on the pass yielding
+                        // nothing at all: a sparse feature that produced positions and simply kept none
+                        // for this cube is behaving correctly, and forcing one here would inflate
+                        // density (it did, once: tuff jumped from 1.6 to 155 per 1000 blocks). pick a spot inside this cube and let the feature's own
+                        // remaining modifiers (surface scans, offsets, biome check) decide whether it
+                        // fits there. Without this, features whose height anchoring only resolves
+                        // against a generated world - the cave-biome decorations: dripstone clusters,
+                        // pointed and large dripstone, cave vines, spore blossoms, rooted azalea,
+                        // lush clay and vegetation, classic vines, sculk veins and patches, glow
+                        // lichen - produced nothing at any depth, so a biome's identity had none of
+                        // its contents.
+                        placedThisFeature = runFeatureInCube(holder, placed, access, gen, context,
+                                chunkPos, featureSeed, cubeMinY, cubeMaxY,
+                                Math.max(0, Math.floorDiv(generator.bandMinY() - cubeMaxY,
+                                        generator.stratumHeight())));
+                        recordFeatureNote(holder, placedThisFeature > 0L
+                                ? "placed by the in-cube fallback" : "in-cube fallback placed nothing here");
                     }
                 } catch (Throwable t) {
                     if (complainedFeatureFailures.add(placed.getClass())) {
