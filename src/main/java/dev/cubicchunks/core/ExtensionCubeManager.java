@@ -683,7 +683,8 @@ public final class ExtensionCubeManager {
             for (int sy = net.minecraft.core.SectionPos.blockToSectionCoord(generator.bandMaxY()) - 1;
                     sy >= state.minSection(); sy--) {
                 long key = SectionPos.asLong(pos.x(), sy, pos.z());
-                if (!generated.contains(key)) {
+                boolean inBand = sy >= generator.bandMinSection();
+                if (!inBand && !generated.contains(key)) {
                     continue;
                 }
                 int idx = chunk.getSectionIndexFromSectionY(sy);
@@ -1226,15 +1227,20 @@ public final class ExtensionCubeManager {
             if (chunk == null) {
                 continue;
             }
-            for (int sy = generator.bandMinSection() - 1; sy >= state.minSection(); sy--) {
-                if (!generated.contains(SectionPos.asLong(pos.x(), sy, pos.z()))) {
+            for (int sy = net.minecraft.core.SectionPos.blockToSectionCoord(generator.bandMaxY()) - 1;
+                    sy >= state.minSection(); sy--) {
+                boolean inBand = sy >= generator.bandMinSection();
+                if (!inBand && !generated.contains(SectionPos.asLong(pos.x(), sy, pos.z()))) {
                     continue;
                 }
                 int idx = chunk.getSectionIndexFromSectionY(sy);
                 if (idx < 0 || idx >= chunk.getSections().length) {
                     continue;
                 }
-                int bucket = sy >= generator.bandMinSection() ? -1 : stratumOf(sy);
+                // -1 is vanilla's deepslate layer (the part of the band that is under stone),
+                // -2 the rest of the band. Comparing the deepslate layer with the first stratum
+                // below the band is the seam test: the caves there must be the same caves.
+                int bucket = inBand ? (sy < 0 ? -1 : -2) : stratumOf(sy);
                 java.util.Map<String, Long> tally =
                         census.computeIfAbsent(bucket, s -> new java.util.HashMap<>());
                 scanned.merge(bucket, 4096L, Long::sum);
@@ -1244,8 +1250,10 @@ public final class ExtensionCubeManager {
                             .BuiltInRegistries.BLOCK.getKey(state.getBlock());
                     String name = id == null ? "?" : id.getPath();
                     if (name.equals("air")) {
-                        air.merge(sectionY >= generator.bandMinSection() ? -1 : stratumOf(sectionY),
-                                (long) count, Long::sum);
+                        int airBucket = sectionY >= generator.bandMinSection()
+                                ? (sectionY < 0 ? -1 : -2)
+                                : stratumOf(sectionY);
+                        air.merge(airBucket, (long) count, Long::sum);
                         return;
                     }
                     if (name.equals("deepslate") || name.equals("stone") || name.equals("bedrock")) {
@@ -1257,9 +1265,11 @@ public final class ExtensionCubeManager {
         }
         for (java.util.Map.Entry<Integer, java.util.Map<String, Long>> stratum : census.entrySet()) {
             long blocks = Math.max(1L, scanned.getOrDefault(stratum.getKey(), 1L));
-            int topY = stratum.getKey() < 0
-                    ? generator.bandMaxY()
-                    : generator.bandMinY() - stratum.getKey() * stratumHeight;
+            int topY = stratum.getKey() == -1
+                    ? 0
+                    : (stratum.getKey() == -2
+                            ? generator.bandMaxY()
+                            : generator.bandMinY() - stratum.getKey() * stratumHeight);
             String top = stratum.getValue().entrySet().stream()
                     .sorted(java.util.Map.Entry.<String, Long>comparingByValue().reversed())
                     .limit(14)
