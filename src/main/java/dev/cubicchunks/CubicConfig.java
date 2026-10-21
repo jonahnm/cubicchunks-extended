@@ -34,6 +34,7 @@ public final class CubicConfig {
     public static final ModConfigSpec.DoubleValue ORE_DEPTH_BONUS;
     public static final ModConfigSpec.BooleanValue TILE_VOLUME_FEATURES;
     public static final ModConfigSpec.BooleanValue TRANSPLANT_STRUCTURES;
+    public static final ModConfigSpec.DoubleValue DEEP_CAVE_VARIATION;
     public static final ModConfigSpec.BooleanValue DEEP_STRUCTURES;
 
     public static final ModConfigSpec.IntValue DEBUG_PREGEN_SECTIONS;
@@ -121,6 +122,16 @@ public final class CubicConfig {
                 "columns runs straight into the light engine keeping its storage sized for the",
                 "vanilla height range while cubic chunks carry sections across the modded range.");
         TRANSPLANT_STRUCTURES = b.define("transplantStructures", true);
+        b.comment("Off by default: measured, it changes caviness enough to break the match between",
+                "the band and the stratum under it, and my dev runs cannot judge whether the",
+                "result looks better. Turn it up in a world you can walk through: 0.04-0.08 is a",
+                "mild regional variation, above 0.15 makes whole strata sponge or rubble.",
+                "How much the deep terrain's average caviness varies from place to place and",
+                "depth to depth. The baseline that keeps vanilla's own noise making caves below",
+                "the band is otherwise a constant, so every stratum has the same density of voids.",
+                "This adds an aperiodic modulation so some regions and depths are cavernous and",
+                "others dense. 0 restores the uniform behaviour.");
+        DEEP_CAVE_VARIATION = b.defineInRange("deepCaveVariation", 0.0, 0.0, 0.4);
         b.comment("Generate vanilla structures (ancient cities, villages, ...) in every stratum",
                 "below the vanilla band: each structure's pieces are translated down per stratum,",
                 "with vanilla terrain adaptation (beard) applied by the noise generator.");

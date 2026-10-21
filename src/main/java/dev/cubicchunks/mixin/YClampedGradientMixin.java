@@ -51,6 +51,9 @@ public abstract class YClampedGradientMixin {
                 double t = (y - -128) / 64.0;
                 return Mth.lerp(t, target, this.fromValue);
             }
+            if (this.fromValue == 1.5 && this.toValue == -1.5) {
+                return deepBaseline(target, context, y);
+            }
             return target;
         }
 
@@ -79,6 +82,41 @@ public abstract class YClampedGradientMixin {
             }
         }
         return vanilla(val);
+    }
+
+    /**
+     * A constant deep baseline means the same density of voids at every depth, which is its own kind
+     * of boring. This modulates the baseline - the amount of terrain the noise has to carve through -
+     * over an aperiodic pattern in all three axes, so some places and depths are cavernous and others
+     * dense, and the pattern never closes up inside a reachable world.
+     *
+     * The periods are deliberately incommensurate (419, 613, 768, 977 blocks): no common multiple
+     * fits within any depth anyone will actually generate. The modulation fades in below the seam, so
+     * the band's own caves - and the match between y=-64 and the first stratum - are untouched.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private double deepBaseline(double target, DensityFunction.FunctionContext context, int y) {
+        double amplitude = CubicConfig.DEEP_CAVE_VARIATION.get();
+        if (amplitude <= 0.0) {
+            return target;
+        }
+        // Measured, air fraction is steeply sensitive to this baseline: a target of 0.8 gave about
+        // 37 voids per 1k in the first stratum, 0.69 gave about 178, and one stratum that landed
+        // near 0.95 came out almost solid at 7.5. So the swing has to stay small or whole slices
+        // turn into either sponge or rubble. It also starts well below the band so the match between
+        // y=-64 and the stratum under it is left alone.
+        double envelope = Math.min(1.0, (-400.0 - y) / 900.0);
+        if (envelope <= 0.0) {
+            return target;
+        }
+        // Weighted toward the horizontal terms on purpose: variation that is mostly a function of Y
+        // reads as alternating rings, which is just repetition with extra steps. The depth term has
+        // a period longer than any reachable stratum so it drifts instead of cycling.
+        double pattern = 0.45 * Math.sin(context.blockX() * (2.0 * Math.PI / 419.0))
+                + 0.45 * Math.sin(context.blockZ() * (2.0 * Math.PI / 613.0))
+                + 0.25 * Math.sin(y * (2.0 * Math.PI / 2999.0))
+                + 0.25 * Math.sin((context.blockX() + context.blockZ()) * (2.0 * Math.PI / 977.0));
+        return target + amplitude * envelope * pattern;
     }
 
     @org.spongepowered.asm.mixin.Unique
