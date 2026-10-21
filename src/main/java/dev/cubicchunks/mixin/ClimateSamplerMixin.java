@@ -36,7 +36,8 @@ public abstract class ClimateSamplerMixin {
             return;
         }
         Climate.TargetPoint mapped = DeepBiomeProfile.sample((Climate.Sampler)(Object)this, quartX, quartY,
-                quartZ, bandMinY, WorldGenState.REMAP_BAND_HEIGHT.get());
+                quartZ, bandMinY, WorldGenState.REMAP_BAND_HEIGHT.get(),
+                WorldGenState.REMAP_WORLD_MIN_Y.get());
         if (mapped != null) {
             cir.setReturnValue(mapped);
             cir.cancel();

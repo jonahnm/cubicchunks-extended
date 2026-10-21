@@ -46,6 +46,16 @@ public final class DeepBiomeProfile {
      * biomes live in its lowest stretch; walking further reaches the surface, where the parameters
      * select surface biomes and the deep world ends up with plains and oceans underground.
      */
+    /** Depth axis below the band: just under it, and at the floor of the modded range. */
+    private static final long DEPTH_NEAR_BAND = 5500L;
+    private static final long DEPTH_FLOOR = 11000L;
+
+    /** Blocks of real depth for one round trip of each swept axis. Different periods so the
+     * combination of axes - and therefore the biome selected - does not repeat at a common stride. */
+    private static final int WEIRD_PERIOD = 768;
+    private static final int EROSION_PERIOD = 1153;
+    private static final int HUMID_PERIOD = 1409;
+
     private static final int CAVE_LAYER_DIVISOR = 6;
     private static final int MIN_CAVE_LAYER = 32;
     private static final int MAX_CAVE_LAYER = 96;
@@ -60,9 +70,10 @@ public final class DeepBiomeProfile {
      * @param quartZ     quart Z of the real position
      * @param bandMinY   bottom of the vanilla band, i.e. the top of the modded range
      * @param bandHeight height of the vanilla band, in blocks
+     * @param worldMinY  bottom of the modded range
      */
-    public static Climate.TargetPoint sample(
-            Climate.Sampler sampler, int quartX, int quartY, int quartZ, int bandMinY, int bandHeight) {
+    public static Climate.TargetPoint sample(Climate.Sampler sampler, int quartX, int quartY, int quartZ,
+            int bandMinY, int bandHeight, int worldMinY) {
         int blockY = QuartPos.toBlock(quartY);
         if (blockY >= bandMinY) {
             return null;
@@ -80,6 +91,51 @@ public final class DeepBiomeProfile {
         // through the cave layer. Every following walk runs backwards, so the end of one meets the
         // start of the next and the biome field carries no seam in it.
         int offset = (lap & 1) == 0 ? step : layer - 1 - step;
-        return sampler.sample(quartX, QuartPos.fromBlock(bandMinY + offset), quartZ);
+        Climate.TargetPoint sampled = sampler.sample(quartX, QuartPos.fromBlock(bandMinY + offset), quartZ);
+        // Weirdness is vanilla's cave-variety axis: it is what separates lush caves from dripstone
+        // caves from the deep dark at one and the same depth. Sweeping it with the real depth walks
+        // vanilla's picker across those regions as you descend, which is what makes biomes change
+        // vertically instead of one regional biome continuing to the floor. Biomes other mods add
+        // are gated on these same axes, so they rotate in and out with the sweep as well.
+        // Depth is the axis vanilla uses to tell underground from surface, and below the band the
+        // field stops changing on it, so it is set from the real depth: shallow cave biomes near the
+        // band, the deep ones further down. Weirdness is swept on top of that, so at a given depth
+        // the picker still walks across the cave regions that differ on that axis - lush, dripstone,
+        // deep dark, and whatever a mod adds with its own gates.
+        // The cave biomes vanilla can select underground are gated on regional axes, not on depth:
+        // dripstone caves want continentalness at 0.8 and above, lush caves want humidity at 0.7 and
+        // above, the deep dark wants erosion at -0.375 or below. Sweeping depth therefore cannot
+        // produce them - only those axes can. So the field below the band keeps the region's own
+        // temperature and continentalness (which is what decides whether a place is land, coast or
+        // sea, and stops ocean biomes turning up underground) and blends the three axes the cave
+        // entries gate on toward a swept target, each on its own period so their combinations
+        // rotate as you descend.
+        //
+        // Blended, not added: a value already spanning +-10000 saturates the moment 20000 is added
+        // to it, which is what the first version of this did - the clamp produced a constant and
+        // three different strata reported byte-identical biome counts.
+        long weirdness = blend(sampled.weirdness(), triangle(belowBand, WEIRD_PERIOD), 0.85);
+        long erosion = blend(sampled.erosion(), triangle(belowBand + 400, EROSION_PERIOD), 0.6);
+        long humidity = blend(sampled.humidity(), triangle(belowBand + 900, HUMID_PERIOD), 0.55);
+        double fraction = Math.min(1.0, (double) belowBand / Math.max(1, bandMinY - worldMinY));
+        long depth = (long) (DEPTH_NEAR_BAND + fraction * (DEPTH_FLOOR - DEPTH_NEAR_BAND));
+        return new Climate.TargetPoint(sampled.temperature(), humidity,
+                sampled.continentalness(), erosion, depth, weirdness);
+    }
+
+    /**
+     * A triangular wave in 0..1 over the given period, so a value sweeps out and back again and the
+     * boundary between one round trip and the next is continuous.
+     */
+    private static double triangle(int value, int period) {
+        int half = period / 2;
+        int phase = Math.floorMod(value, period);
+        return phase < half ? (double) phase / half : 1.0 - (double) (phase - half) / half;
+    }
+
+    /** Moves a sampled axis a given fraction of the way toward the swept value at phase t. */
+    private static long blend(long sampled, double t, double weight) {
+        long target = (long) (-10000.0 + 20000.0 * t);
+        return (long) (sampled + (target - sampled) * weight);
     }
 }

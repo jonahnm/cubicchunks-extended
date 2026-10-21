@@ -32,6 +32,7 @@ public final class CubicConfig {
     public static final ModConfigSpec.BooleanValue REMAP_DEEP_BIOMES;
     public static final ModConfigSpec.IntValue LAVA_NEAR_FLOOR_DEPTH;
     public static final ModConfigSpec.DoubleValue ORE_DEPTH_BONUS;
+    public static final ModConfigSpec.BooleanValue TILE_VOLUME_FEATURES;
     public static final ModConfigSpec.BooleanValue DEEP_STRUCTURES;
 
     public static final ModConfigSpec.IntValue DEBUG_PREGEN_SECTIONS;
@@ -109,6 +110,11 @@ public final class CubicConfig {
                 "band. Ores continue naturally below -64 (vanilla ranges already dip below it),",
                 "then tile downward; each tiling multiplies placement count by 1 + n * this.");
         ORE_DEPTH_BONUS = b.defineInRange("oreDepthBonusPerStratum", 0.5, 0.0, 16.0);
+        b.comment("Tile volume features such as geodes below the band at the band's own rate.",
+                "Off by default: a geode is a hollow sphere of tuff and calcite, and twelve per",
+                "column is a sane rate for the 64 blocks of vanilla's deepslate layer but fills",
+                "thousands of blocks of depth with geode shell.");
+        TILE_VOLUME_FEATURES = b.define("tileVolumeFeatures", false);
         b.comment("Generate vanilla structures (ancient cities, villages, ...) in every stratum",
                 "below the vanilla band: each structure's pieces are translated down per stratum,",
                 "with vanilla terrain adaptation (beard) applied by the noise generator.");

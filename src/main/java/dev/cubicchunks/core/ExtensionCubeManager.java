@@ -1460,13 +1460,28 @@ public final class ExtensionCubeManager {
      * exist below the band) would be placed at a density nothing in the data supports, and their
      * deepslate counterparts already run through the normal path.
      */
+    /**
+     * The registry name of a configured feature's type, for example "minecraft:geode" or
+     * "minecraft:scattered_ore". The class name cannot be used: {@code ConfiguredFeature} holds its
+     * feature as a {@code Holder<FeatureType>}, a factory wrapper, so asking it for a class name only
+     * ever answers "FeatureType" - which is why an earlier check written that way matched nothing and
+     * geodes kept placing no matter what it said.
+     */
+    private static String featureTypeId(Holder<PlacedFeature> holder) {
+        return holder.value().feature().unwrapKey()
+                .map(key -> key.identifier().toString().toLowerCase(java.util.Locale.ROOT))
+                .orElse("");
+    }
+
+    /** Features that replace a whole volume around their position rather than adding a vein. */
+    private static boolean isVolumeFeature(Holder<PlacedFeature> holder) {
+        return featureTypeId(holder).contains("geode");
+    }
+
     private static boolean isOreOrDiskFeature(Holder<PlacedFeature> holder) {
-        String type = holder.value().feature().value().getClass().getSimpleName();
-        // Geodes replace a whole volume around their position (their shell is tuff and calcite), so
-        // force-placing one per cube turns the deep world into a wall of geode shell and plugs the
-        // caves. Rarity-gated geodes are tiled by the normal path instead.
-        return type.contains("Ore") || type.contains("Disk") || type.contains("Spring")
-                || type.contains("Geode");
+        String type = featureTypeId(holder);
+        return type.contains("ore") || type.contains("disk") || type.contains("spring")
+                || type.contains("geode");
     }
 
     private static final int IN_CUBE_FALLBACK_ATTEMPTS = 2;
@@ -1846,6 +1861,17 @@ public final class ExtensionCubeManager {
             int innerIndex = 0;
             for (Holder<PlacedFeature> holder : stepFeatures) {
                 PlacedFeature placed = holder.value();
+                // A geode replaces a volume: its shell is tuff and calcite and its inside is a
+                // hollow sphere. Vanilla has about twelve of them per column in the sixty-four
+                // blocks of its deepslate layer; repeating that rate over thousands of blocks of
+                // depth fills the modded range with geode shell and reads as a world made of
+                // geodes. Volume features stay where vanilla puts them unless a pack asks for
+                // them to be tiled.
+                if (!CubicConfig.TILE_VOLUME_FEATURES.get() && isVolumeFeature(holder)) {
+                    recordFeatureSkipped(holder, "skipped: volume feature (geode), kept inside the band");
+                    innerIndex++;
+                    continue;
+                }
                 if (!isStratumEligible(placed)) {
                     recordFeatureSkipped(holder, hasHeightmapPlacement(placed)
                             ? "skipped: anchored to the terrain surface (heightmap placement)"
