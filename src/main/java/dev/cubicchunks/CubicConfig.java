@@ -120,7 +120,7 @@ public final class CubicConfig {
                 "that stratum maps to. Off by default for now: it works, but loading those source",
                 "columns runs straight into the light engine keeping its storage sized for the",
                 "vanilla height range while cubic chunks carry sections across the modded range.");
-        TRANSPLANT_STRUCTURES = b.define("transplantStructures", false);
+        TRANSPLANT_STRUCTURES = b.define("transplantStructures", true);
         b.comment("Generate vanilla structures (ancient cities, villages, ...) in every stratum",
                 "below the vanilla band: each structure's pieces are translated down per stratum,",
                 "with vanilla terrain adaptation (beard) applied by the noise generator.");

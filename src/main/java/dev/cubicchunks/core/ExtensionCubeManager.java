@@ -840,8 +840,9 @@ public final class ExtensionCubeManager {
                 DeepStructures.DEEP_PIECES_COPIED.get());
         CubicChunks.LOGGER.info("[CubicChunks]   structures generated here: {} pieces, box y range {}..{}",
                 DeepStructures.GEN_PIECE_COUNT, DeepStructures.GEN_MIN_Y, DeepStructures.GEN_MAX_Y);
-        CubicChunks.LOGGER.info("[CubicChunks]   transplants: {} source lookups, {} pieces placed",
-                DeepStructures.TRANSPLANT_SOURCE_LOOKUPS.get(),
+        CubicChunks.LOGGER.info("[CubicChunks]   transplants: {} source lookups, {} not loaded,"
+                + " {} pieces placed", DeepStructures.TRANSPLANT_SOURCE_LOOKUPS.get(),
+                DeepStructures.TRANSPLANT_SOURCES_UNLOADED.get(),
                 DeepStructures.TRANSPLANT_PIECES_PLACED.get());
         for (java.util.Map.Entry<String, int[]> entry : tally.entrySet()) {
             int[] row = entry.getValue();
@@ -1315,7 +1316,12 @@ public final class ExtensionCubeManager {
         // Only the source column itself is loaded. Its neighbours are read when already loaded, so
         // a structure that spans chunk borders may arrive partly, rather than this costing a grid
         // of chunk loads for every cube.
-        LevelChunk origin = level.getChunk(source.x(), source.z());
+        LevelChunk origin = level.getChunkSource().getChunkNow(source.x(), source.z());
+        if (origin == null) {
+            DeepStructures.TRANSPLANT_SOURCES_UNLOADED.incrementAndGet();
+            this.transplantCache.put(key, java.util.Collections.emptyList());
+            return java.util.Collections.emptyList();
+        }
         java.util.List<StructurePiece> pieces = new java.util.ArrayList<>();
         int shift = -stratum * Math.max(16, generator.stratumHeight());
         for (int dx = -1; dx <= 1; dx++) {

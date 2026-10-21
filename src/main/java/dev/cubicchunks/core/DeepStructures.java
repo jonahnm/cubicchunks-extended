@@ -49,6 +49,10 @@ public final class DeepStructures {
             new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong TRANSPLANT_SOURCE_LOOKUPS =
             new java.util.concurrent.atomic.AtomicLong();
+    /** Source columns that were not loaded. Transplants are only read from loaded columns, so this
+     * is the number of structures that were not placed because their source was out of range. */
+    public static final java.util.concurrent.atomic.AtomicLong TRANSPLANT_SOURCES_UNLOADED =
+            new java.util.concurrent.atomic.AtomicLong();
     /** The height range structures actually land in, measured as they are generated. Extending a
      * dimension's build height also moves every surface-relative structure height, so this is how
      * to tell "structures are rare" apart from "structures are being placed at y=2048, where there
@@ -182,18 +186,22 @@ public final class DeepStructures {
         h ^= h >>> 32;
         h *= 0x94D049BB133111EBL;
         h ^= h >>> 31;
-        int offX = (int)Math.floorMod(h >>> 11, 512L) - 256;
-        int offZ = (int)Math.floorMod(h >>> 40, 512L) - 256;
-        // Rotate or mirror the map per stratum, so consecutive slices are not translations of one
-        // another. Four orientations are enough: the structure maps are not rotationally symmetric.
-        int x = target.x();
-        int z = target.z();
-        return switch (stratum & 3) {
-            case 1 -> new ChunkPos(x - offX + offZ, -z - offZ - offX);
-            case 2 -> new ChunkPos(-x + offX, z + offZ);
-            case 3 -> new ChunkPos(x + offZ, -z + offX);
-            default -> new ChunkPos(x + offX, z + offZ);
-        };
+        // Offsets stay inside a player's view distance on purpose. Reading a source column must
+        // never block on a chunk load: asking for one from inside chunk generation deadlocks the
+        // chunk executor waiting on the main thread, which is what took a 60-second tick and got
+        // the server killed by the watchdog. Small offsets mean the source is usually already
+        // loaded, so the lookup is a lookup and not a generation request.
+        int offX = (int)Math.floorMod(h >>> 11, 21L) - 10;
+        int offZ = (int)Math.floorMod(h >>> 40, 21L) - 10;
+        // Offsets stay local on purpose, and the map is translated rather than rotated.
+        // A source column is only ever read when it is already loaded: asking for one from
+        // inside chunk generation blocks on the executor that is waiting on the main thread,
+        // which is what put a 60-second tick on the server and had the watchdog kill it. A
+        // rotation or mirror maps a distant column to a distant column, so almost nothing
+        // would ever be available; a translation keeps the source within reach while still
+        // giving each stratum its own structure map, different from the band's and from each
+        // other stratum.
+        return new ChunkPos(target.x() + offX, target.z() + offZ);
     }
 
     /** Shifts the Y components of the piece's "BB" (int array of 6) and "TP"/"POS" pivots. */
