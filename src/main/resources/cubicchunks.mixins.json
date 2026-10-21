@@ -14,7 +14,8 @@
     "ClimateSamplerMixin",
     "CountPlacementMixin",
     "RepeatingPlacementMixin",
-    "WorldCarverMixin"
+    "WorldCarverMixin",
+    "LightStorageDiagnosticMixin"
   ],
   "client": [
     "ClientLevelMixin",

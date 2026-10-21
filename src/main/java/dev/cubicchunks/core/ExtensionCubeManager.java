@@ -844,6 +844,7 @@ public final class ExtensionCubeManager {
                 + " {} pieces placed", DeepStructures.TRANSPLANT_SOURCE_LOOKUPS.get(),
                 DeepStructures.TRANSPLANT_SOURCES_UNLOADED.get(),
                 DeepStructures.TRANSPLANT_PIECES_PLACED.get());
+        CubicChunks.LOGGER.info("[CubicChunks]   light: {}", dev.cubicchunks.core.LightProbe.summary());
         if (!DeepStructures.TRANSPLANTED_BY_STRUCTURE.isEmpty()) {
             java.util.List<String> names = new java.util.ArrayList<>(
                     DeepStructures.TRANSPLANTED_BY_STRUCTURE.keySet());
