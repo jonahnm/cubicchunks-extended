@@ -340,7 +340,15 @@ public final class ExtensionCubeManager {
                 continue;
             }
             int sy = SectionPos.y(key);
+            // Loaded-only here meant a headless test could never regenerate anything: after a
+            // benchmark walk the columns it generated are released, so every entry in the generated
+            // set resolved to null and the command reported zero rebuilt. A command runs on the main
+            // thread and not inside chunk generation, which is the case where a blocking chunk load
+            // is the normal pattern rather than the deadlock it was inside a generation pass.
             LevelChunk chunk = level.getChunkSource().getChunkNow(cx, cz);
+            if (chunk == null) {
+                chunk = level.getChunk(cx, cz);
+            }
             if (chunk == null) {
                 continue;
             }
