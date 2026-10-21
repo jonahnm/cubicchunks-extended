@@ -842,8 +842,10 @@ public final class ExtensionCubeManager {
         CubicChunks.LOGGER.info("[CubicChunks]   structures generated here: {} pieces, box y range {}..{}",
                 DeepStructures.GEN_PIECE_COUNT, DeepStructures.GEN_MIN_Y, DeepStructures.GEN_MAX_Y);
         CubicChunks.LOGGER.info("[CubicChunks]   transplants: {} source lookups, {} not loaded,"
-                + " {} pieces placed", DeepStructures.TRANSPLANT_SOURCE_LOOKUPS.get(),
+                + " {} requested, {} loaded, {} pieces placed", DeepStructures.TRANSPLANT_SOURCE_LOOKUPS.get(),
                 DeepStructures.TRANSPLANT_SOURCES_UNLOADED.get(),
+                DeepStructures.TRANSPLANT_SOURCES_REQUESTED.get(),
+                DeepStructures.TRANSPLANT_SOURCES_LOADED.get(),
                 DeepStructures.TRANSPLANT_PIECES_PLACED.get());
         CubicChunks.LOGGER.info("[CubicChunks]   light: {}", dev.cubicchunks.core.LightProbe.summary());
         long bearded = DeepStructures.BEARDED_CUBES.get();
@@ -1004,6 +1006,11 @@ public final class ExtensionCubeManager {
     }
 
     public void serverTick() {
+        // Structure source columns are loaded here, from the tick loop, never from inside chunk
+        // generation: asking for a column while one is being generated makes the chunk executor wait
+        // on the main thread, which is what put a 60-second tick on the server and had the watchdog
+        // kill it. Two per tick keeps a stalled request from dominating a tick.
+        loadRequestedStructureSources();
         // 2-tick cadence amortizes the scan; the work budget smooths spikes.
         if (this.level.getServer().getTickCount() % 2 == 0) {
             buildWorkQueue();
@@ -1368,6 +1375,47 @@ public final class ExtensionCubeManager {
      * encapsulate). Vanilla reads this from the start while building a beardifier; a piece held on
      * its own cannot answer that, so it is recorded at the moment the piece is taken from a start.
      */
+    /**
+     * Source columns a transplant lookup wanted but could not read. Queued by the lookup, drained by
+     * the tick loop. Kept as pending until it succeeds, and failures are deliberately not cached:
+     * caching an empty result made a column that happened to be unloaded stay structureless for the
+     * rest of the session.
+     */
+    private final java.util.ArrayDeque<ChunkPos> pendingStructureSources = new java.util.ArrayDeque<>();
+    private final java.util.Set<ChunkPos> alreadyRequestedSources = new java.util.HashSet<>();
+    private static final int MAX_PENDING_STRUCTURE_SOURCES = 512;
+    private static final int STRUCTURE_SOURCE_LOADS_PER_TICK = 2;
+
+    private void requestStructureSource(ChunkPos source) {
+        if (this.pendingStructureSources.size() >= MAX_PENDING_STRUCTURE_SOURCES
+                || !this.alreadyRequestedSources.add(source)) {
+            return;
+        }
+        this.pendingStructureSources.add(source);
+        DeepStructures.TRANSPLANT_SOURCES_REQUESTED.incrementAndGet();
+    }
+
+    private void loadRequestedStructureSources() {
+        if (this.pendingStructureSources.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < STRUCTURE_SOURCE_LOADS_PER_TICK; i++) {
+            ChunkPos source = this.pendingStructureSources.poll();
+            if (source == null) {
+                return;
+            }
+            if (level.getChunkSource().getChunkNow(source.x(), source.z()) == null) {
+                level.getChunk(source.x(), source.z());
+            }
+            if (level.getChunkSource().getChunkNow(source.x(), source.z()) != null) {
+                DeepStructures.TRANSPLANT_SOURCES_LOADED.incrementAndGet();
+            } else {
+                // not ready yet: ask again on a later tick rather than dropping the request
+                this.alreadyRequestedSources.remove(source);
+            }
+        }
+    }
+
     private final java.util.Map<StructurePiece, net.minecraft.world.level.levelgen.structure.TerrainAdjustment> pieceAdaptations =
             java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
 
@@ -1404,7 +1452,7 @@ public final class ExtensionCubeManager {
         LevelChunk origin = level.getChunkSource().getChunkNow(source.x(), source.z());
         if (origin == null) {
             DeepStructures.TRANSPLANT_SOURCES_UNLOADED.incrementAndGet();
-            this.transplantCache.put(key, java.util.Collections.emptyList());
+            requestStructureSource(source);
             return java.util.Collections.emptyList();
         }
         java.util.List<StructurePiece> pieces = new java.util.ArrayList<>();

@@ -63,6 +63,11 @@ public final class DeepStructures {
             new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong TRANSPLANT_SOURCES_UNLOADED =
             new java.util.concurrent.atomic.AtomicLong();
+    /** Source columns handed to the chunk loader because they were not loaded. */
+    public static final java.util.concurrent.atomic.AtomicLong TRANSPLANT_SOURCES_REQUESTED =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong TRANSPLANT_SOURCES_LOADED =
+            new java.util.concurrent.atomic.AtomicLong();
     /** The height range structures actually land in, measured as they are generated. Extending a
      * dimension's build height also moves every surface-relative structure height, so this is how
      * to tell "structures are rare" apart from "structures are being placed at y=2048, where there

@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'dev.cubicchunks'
-version = '0.2.13'
+version = '0.2.14'
 
 base {
     archivesName = 'cubicchunks'
