@@ -33,6 +33,7 @@ public final class CubicConfig {
     public static final ModConfigSpec.IntValue LAVA_NEAR_FLOOR_DEPTH;
     public static final ModConfigSpec.DoubleValue ORE_DEPTH_BONUS;
     public static final ModConfigSpec.BooleanValue TILE_VOLUME_FEATURES;
+    public static final ModConfigSpec.BooleanValue TRANSPLANT_STRUCTURES;
     public static final ModConfigSpec.BooleanValue DEEP_STRUCTURES;
 
     public static final ModConfigSpec.IntValue DEBUG_PREGEN_SECTIONS;
@@ -115,6 +116,11 @@ public final class CubicConfig {
                 "column is a sane rate for the 64 blocks of vanilla's deepslate layer but fills",
                 "thousands of blocks of depth with geode shell.");
         TILE_VOLUME_FEATURES = b.define("tileVolumeFeatures", false);
+        b.comment("Give each stratum below the band its own structures, taken from the band column",
+                "that stratum maps to. Off by default for now: it works, but loading those source",
+                "columns runs straight into the light engine keeping its storage sized for the",
+                "vanilla height range while cubic chunks carry sections across the modded range.");
+        TRANSPLANT_STRUCTURES = b.define("transplantStructures", false);
         b.comment("Generate vanilla structures (ancient cities, villages, ...) in every stratum",
                 "below the vanilla band: each structure's pieces are translated down per stratum,",
                 "with vanilla terrain adaptation (beard) applied by the noise generator.");

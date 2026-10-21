@@ -44,8 +44,28 @@ public final class DeepStructures {
             new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong CHUNKS_WITH_STARTS_AT_GENERATION =
             new java.util.concurrent.atomic.AtomicLong();
+    /** Transplanted pieces actually written into cubes, which is the number that matters. */
+    public static final java.util.concurrent.atomic.AtomicLong TRANSPLANT_PIECES_PLACED =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong TRANSPLANT_SOURCE_LOOKUPS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** The height range structures actually land in, measured as they are generated. Extending a
+     * dimension's build height also moves every surface-relative structure height, so this is how
+     * to tell "structures are rare" apart from "structures are being placed at y=2048, where there
+     * is no terrain". */
+    public static volatile int GEN_MIN_Y = Integer.MAX_VALUE;
+    public static volatile int GEN_MAX_Y = Integer.MIN_VALUE;
+    public static volatile int GEN_PIECE_COUNT;
 
     private DeepStructures() {}
+
+    /**
+     * A piece copy needs a serialization context, and the only place one is safely available is
+     * vanilla's own structure stage (which is handed the registry and template manager). It is
+     * stashed here so cube generation can reuse it instead of assembling one - building it during
+     * generation from the level looked up neighbours and deadlocked the worldgen mailbox.
+     */
+    public static volatile StructurePieceSerializationContext SHARED_CONTEXT;
 
     public static void createDeepStarts(RegistryAccessHolder holder, StructureManager structureManager, ChunkAccess chunk) {
         // NOTE: holder.context() must be constructed with the SERVER's registry/template manager.
@@ -61,6 +81,7 @@ public final class DeepStructures {
             return;
         }
         STRUCTURE_STAGE_CALLS.incrementAndGet();
+        SHARED_CONTEXT = holder.context();
         int present = 0;
         for (StructureStart start : chunk.getAllStarts().values()) {
             if (start != null && start.isValid()) {
@@ -80,6 +101,17 @@ public final class DeepStructures {
         for (StructureStart start : chunk.getAllStarts().values()) {
             if (start == null || !start.isValid() || start.getPieces().isEmpty()) {
                 continue;
+            }
+            for (StructurePiece piece : start.getPieces()) {
+                int y0 = piece.getBoundingBox().minY();
+                int y1 = piece.getBoundingBox().maxY();
+                if (y0 < GEN_MIN_Y) {
+                    GEN_MIN_Y = y0;
+                }
+                if (y1 > GEN_MAX_Y) {
+                    GEN_MAX_Y = y1;
+                }
+                GEN_PIECE_COUNT++;
             }
             List<StructurePiece> combined = new ArrayList<>(start.getPieces());
             for (int stratum = 1; stratum <= maxStrata; stratum++) {
@@ -106,7 +138,7 @@ public final class DeepStructures {
     }
 
     /** Deep-copies a piece via its NBT round-trip, translating its bounding box (and pivot). */
-    private static StructurePiece copyTranslated(StructurePiece piece, RegistryAccessHolder holder, int shift) {
+    public static StructurePiece copyTranslated(StructurePiece piece, RegistryAccessHolder holder, int shift) {
         try {
             CompoundTag tag = piece.createTag(holder.context());
             shiftTagY(tag, shift);
@@ -130,6 +162,37 @@ public final class DeepStructures {
         return switch (rl.getPath()) {
             case "nvi", "pcp", "bastionremnant", "runtime" -> Identifier.withDefaultNamespace("jigsaw");
             default -> rl;
+        };
+    }
+
+    /**
+     * Which band column a deep cube's structures come from. Each stratum uses its own shift and its
+     * own orientation, derived from the world seed, so the deep world is not the band's structure
+     * map pasted straight down: a column that has nothing in the band can host something a
+     * stratum or two down, and the rate per stratum is the rate vanilla uses per 384 blocks.
+     *
+     * @param target   the column the cube belongs to
+     * @param stratum  which 384-block slice below the band, 1 for the first
+     * @param seed     the world seed
+     */
+    public static ChunkPos sourceColumnFor(ChunkPos target, int stratum, long seed) {
+        long h = seed ^ (stratum * 0x9E3779B97F4A7C15L);
+        h ^= h >>> 30;
+        h *= 0xBF58476D1CE4E5B9L;
+        h ^= h >>> 32;
+        h *= 0x94D049BB133111EBL;
+        h ^= h >>> 31;
+        int offX = (int)Math.floorMod(h >>> 11, 512L) - 256;
+        int offZ = (int)Math.floorMod(h >>> 40, 512L) - 256;
+        // Rotate or mirror the map per stratum, so consecutive slices are not translations of one
+        // another. Four orientations are enough: the structure maps are not rotationally symmetric.
+        int x = target.x();
+        int z = target.z();
+        return switch (stratum & 3) {
+            case 1 -> new ChunkPos(x - offX + offZ, -z - offZ - offX);
+            case 2 -> new ChunkPos(-x + offX, z + offZ);
+            case 3 -> new ChunkPos(x + offZ, -z + offX);
+            default -> new ChunkPos(x + offX, z + offZ);
         };
     }
 

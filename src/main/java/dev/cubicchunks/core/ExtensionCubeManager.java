@@ -31,6 +31,7 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSerializationContext;
 import net.minecraft.world.level.levelgen.structure.StructurePiece;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.chunk.ChunkGenerator;
@@ -837,6 +838,11 @@ public final class ExtensionCubeManager {
                 + " deep pieces copied {}", columns, withStarts, starts, tally.size(),
                 DeepStructures.STRUCTURE_STAGE_CALLS.get(), DeepStructures.DEEP_STARTS_CREATED.get(),
                 DeepStructures.DEEP_PIECES_COPIED.get());
+        CubicChunks.LOGGER.info("[CubicChunks]   structures generated here: {} pieces, box y range {}..{}",
+                DeepStructures.GEN_PIECE_COUNT, DeepStructures.GEN_MIN_Y, DeepStructures.GEN_MAX_Y);
+        CubicChunks.LOGGER.info("[CubicChunks]   transplants: {} source lookups, {} pieces placed",
+                DeepStructures.TRANSPLANT_SOURCE_LOOKUPS.get(),
+                DeepStructures.TRANSPLANT_PIECES_PLACED.get());
         for (java.util.Map.Entry<String, int[]> entry : tally.entrySet()) {
             int[] row = entry.getValue();
             CubicChunks.LOGGER.info("[CubicChunks]   {} : {} pieces, {} below the band, {} starts,"
@@ -1239,8 +1245,14 @@ public final class ExtensionCubeManager {
             return;
         }
         Map<Integer, java.util.List<StructurePiece>> index = pieceIndexForColumn(chunk);
-        java.util.List<StructurePiece> pieces = index.get(sectionY);
-        if (pieces == null) {
+        java.util.List<StructurePiece> own = index.get(sectionY);
+        java.util.List<StructurePiece> pieces = new java.util.ArrayList<>();
+        if (own != null) {
+            pieces.addAll(own);
+        }
+        // Structures of this stratum, taken from the band column this slice maps to.
+        pieces.addAll(transplantedPieces(chunk.getPos(), stratumOf(sectionY)));
+        if (pieces.isEmpty()) {
             return;
         }
         ChunkPos chunkPos = chunk.getPos();
@@ -1256,6 +1268,7 @@ public final class ExtensionCubeManager {
             RandomSource rand = RandomSource.create(level.getSeed()
                     ^ sectionY * 1000003587L ^ chunkPos.pack()
                     ^ System.identityHashCode(piece));
+            DeepStructures.TRANSPLANT_PIECES_PLACED.incrementAndGet();
             try {
                 piece.postProcess(pieceAccess(chunk), structureManager, level.getChunkSource().getGenerator(),
                         rand, cubeBox, chunkPos,
@@ -1270,6 +1283,72 @@ public final class ExtensionCubeManager {
     }
 
     /** Section Y -> pieces, built from the starts of this and any already-loaded neighbour column. */
+    /** Transplanted pieces per (source column, stratum): the same source is reused while a player
+     * keeps streaming nearby columns, so the cost is paid once per source, not once per cube. */
+    private final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<java.util.List<StructurePiece>> transplantCache =
+            new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+
+
+    private java.util.List<StructurePiece> transplantedPieces(ChunkPos target, int stratum) {
+        if (stratum < 1 || !CubicConfig.DEEP_STRUCTURES.get() || !CubicConfig.TRANSPLANT_STRUCTURES.get()) {
+            return java.util.Collections.emptyList();
+        }
+        StructurePieceSerializationContext context = DeepStructures.SHARED_CONTEXT;
+        if (context == null) {
+            return java.util.Collections.emptyList(); // no serialization context seen yet
+        }
+        ChunkPos source = DeepStructures.sourceColumnFor(target, stratum, level.getSeed());
+        // The per-column index already covers this column and its neighbours' starts, including the
+        // deep copies the generation stage made from them. Reading those again would place twice.
+        if (Math.abs(source.x() - target.x()) <= 1 && Math.abs(source.z() - target.z()) <= 1) {
+            return java.util.Collections.emptyList();
+        }
+        long key = source.pack() ^ ((long) stratum * 0x9E3779B97F4A7C15L);
+        java.util.List<StructurePiece> cached = this.transplantCache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        if (this.transplantCache.size() > 4096) {
+            this.transplantCache.clear();
+        }
+        DeepStructures.TRANSPLANT_SOURCE_LOOKUPS.incrementAndGet();
+        // Only the source column itself is loaded. Its neighbours are read when already loaded, so
+        // a structure that spans chunk borders may arrive partly, rather than this costing a grid
+        // of chunk loads for every cube.
+        LevelChunk origin = level.getChunk(source.x(), source.z());
+        java.util.List<StructurePiece> pieces = new java.util.ArrayList<>();
+        int shift = -stratum * Math.max(16, generator.stratumHeight());
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                LevelChunk col = dx == 0 && dz == 0
+                        ? origin : level.getChunkSource().getChunkNow(source.x() + dx, source.z() + dz);
+                if (col == null) {
+                    continue;
+                }
+                for (StructureStart start : col.getAllStarts().values()) {
+                    if (start == null || !start.isValid()) {
+                        continue;
+                    }
+                    for (StructurePiece piece : start.getPieces()) {
+                        BoundingBox box = piece.getBoundingBox();
+                        // Only structures that reach below the surface. A village is a structure too,
+                        // and a village at y=-900 is not what "underground structures" means.
+                        if (box.minY() >= 0) {
+                            continue;
+                        }
+                        StructurePiece copy = DeepStructures.copyTranslated(
+                                piece, new DeepStructures.RegistryAccessHolder(context), shift);
+                        if (copy != null) {
+                            pieces.add(copy);
+                        }
+                    }
+                }
+            }
+        }
+        this.transplantCache.put(key, pieces);
+        return pieces;
+    }
+
     private Map<Integer, java.util.List<StructurePiece>> pieceIndexForColumn(LevelChunk chunk) {
         ChunkPos origin = chunk.getPos();
         long columnKey = origin.pack();
