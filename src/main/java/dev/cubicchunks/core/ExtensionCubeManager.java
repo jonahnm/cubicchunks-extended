@@ -1509,6 +1509,35 @@ public final class ExtensionCubeManager {
         return pieces;
     }
 
+    /**
+     * The structures a column should be treated as containing: what its own chunk map reports, plus
+     * anything the level's structure manager associates with it. The deep structures this mod creates
+     * during generation are registered with the structure manager, so reading only the chunk's map can
+     * mean deep starts and thousands of translated pieces exist while no cube ever places one of them
+     * - which is what the last two measurements showed.
+     */
+    private java.util.Collection<StructureStart> startsVisibleToColumn(ChunkPos pos) {
+        java.util.List<StructureStart> all = new java.util.ArrayList<>();
+        LevelChunk col = level.getChunkSource().getChunkNow(pos.x(), pos.z());
+        if (col != null) {
+            for (StructureStart value : col.getAllStarts().values()) {
+                if (value != null) {
+                    all.add(value);
+                }
+            }
+        }
+        try {
+            for (StructureStart value : level.structureManager().startsForStructure(pos, structure -> true)) {
+                if (value != null && !all.contains(value)) {
+                    all.add(value);
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // Fall back to what the chunk itself reports.
+        }
+        return all;
+    }
+
     private Map<Integer, java.util.List<StructurePiece>> pieceIndexForColumn(LevelChunk chunk) {
         ChunkPos origin = chunk.getPos();
         long columnKey = origin.pack();
@@ -1524,7 +1553,7 @@ public final class ExtensionCubeManager {
                 if (col == null) {
                     continue;
                 }
-                for (StructureStart start : col.getAllStarts().values()) {
+                for (StructureStart start : startsVisibleToColumn(col.getPos())) {
                     if (start == null || !start.isValid()) {
                         continue;
                     }
