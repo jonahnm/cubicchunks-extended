@@ -458,6 +458,7 @@ public final class ExtensionCubeManager {
         debugReportBlockCensus(columns);
         debugColumnSaveBreakdown(spawn);
         debugReportBiomeProfile(columns);
+        debugReportStructures(columns);
         debugReportCubeComposition(spawn);
         this.profileCost = false;
     }
@@ -785,6 +786,64 @@ public final class ExtensionCubeManager {
             total += value;
         }
         return total;
+    }
+
+    /**
+     * Counts what structure machinery is actually available on the tested columns: which starts are
+     * recorded, how many pieces they carry, how many of those pieces lie below the band, and the
+     * height range the pieces cover. This separates "no deep starts exist" from "deep starts exist
+     * but nothing is placed from them".
+     */
+    public void debugReportStructures(java.util.Collection<ChunkPos> positions) {
+        java.util.Map<String, int[]> tally = new java.util.TreeMap<>();
+        int columns = 0;
+        int withStarts = 0;
+        int starts = 0;
+        for (ChunkPos pos : positions) {
+            LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
+            if (chunk == null) {
+                continue;
+            }
+            columns++;
+            if (!chunk.getAllStarts().isEmpty()) {
+                withStarts++;
+            }
+            for (StructureStart start : chunk.getAllStarts().values()) {
+                if (start == null || !start.isValid()) {
+                    continue;
+                }
+                starts++;
+                for (StructurePiece piece : start.getPieces()) {
+                    // Piece class names, because 26.2 keys a chunk's starts by the Structure object
+                    // itself rather than a holder, so there is no identifier to read from it here.
+                    // Which kinds of piece exist, and how deep they reach, is what this diagnostic is
+                    // after.
+                    String id = piece.getClass().getSimpleName();
+                    int[] row = tally.computeIfAbsent(id, i ->
+                            new int[] {0, 0, 0, Integer.MAX_VALUE, Integer.MIN_VALUE});
+                    row[0]++;
+                    row[1]++;
+                    BoundingBox box = piece.getBoundingBox();
+                    row[3] = Math.min(row[3], box.minY());
+                    row[4] = Math.max(row[4], box.maxY());
+                    if (box.maxY() < generator.bandMinY()) {
+                        row[2]++;
+                    }
+                }
+            }
+        }
+        CubicChunks.LOGGER.info("[CubicChunks] structures: {} columns, {} carry starts, {} valid starts,"
+                + " {} piece kinds | vanilla structure stage ran {} times, deep starts created {},"
+                + " deep pieces copied {}", columns, withStarts, starts, tally.size(),
+                DeepStructures.STRUCTURE_STAGE_CALLS.get(), DeepStructures.DEEP_STARTS_CREATED.get(),
+                DeepStructures.DEEP_PIECES_COPIED.get());
+        for (java.util.Map.Entry<String, int[]> entry : tally.entrySet()) {
+            int[] row = entry.getValue();
+            CubicChunks.LOGGER.info("[CubicChunks]   {} : {} pieces, {} below the band, {} starts,"
+                    + " box y {}..{}", entry.getKey(), row[1], row[2], row[0],
+                    row[3] == Integer.MAX_VALUE ? "-" : row[3],
+                    row[4] == Integer.MIN_VALUE ? "-" : row[4]);
+        }
     }
 
     public void debugReportBiomeProfile(java.util.Collection<ChunkPos> positions) {

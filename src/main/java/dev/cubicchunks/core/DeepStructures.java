@@ -30,6 +30,14 @@ public final class DeepStructures {
     private static final int BAND_HEIGHT = 384;
     private static final int BAND_MIN = -64;
 
+    /** Instrumentation: how often vanilla's structure stage ran, and what this produced. */
+    public static final java.util.concurrent.atomic.AtomicLong STRUCTURE_STAGE_CALLS =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DEEP_STARTS_CREATED =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DEEP_PIECES_COPIED =
+            new java.util.concurrent.atomic.AtomicLong();
+
     private DeepStructures() {}
 
     public static void createDeepStarts(RegistryAccessHolder holder, StructureManager structureManager, ChunkAccess chunk) {
@@ -45,6 +53,7 @@ public final class DeepStructures {
         if (maxStrata <= 0) {
             return;
         }
+        STRUCTURE_STAGE_CALLS.incrementAndGet();
         SectionPos sectionPos = SectionPos.bottomOf(chunk);
         ChunkPos chunkPos = chunk.getPos();
         // IMPORTANT: read the chunk's OWN structure marks only. structureManager.startsForStructure()
@@ -68,6 +77,8 @@ public final class DeepStructures {
             if (combined.size() == start.getPieces().size()) {
                 continue;
             }
+            DEEP_STARTS_CREATED.incrementAndGet();
+            DEEP_PIECES_COPIED.addAndGet(combined.size() - start.getPieces().size());
             StructureStart deep = new StructureStart(
                     start.getStructure(), chunkPos, start.getReferences(), new PiecesContainer(combined));
             deepStarts.add(deep);
