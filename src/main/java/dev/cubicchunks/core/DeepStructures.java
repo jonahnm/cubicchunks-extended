@@ -56,6 +56,13 @@ public final class DeepStructures {
             new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong BEARD_RIGIDS =
             new java.util.concurrent.atomic.AtomicLong();
+    /** Why the beard found nothing: no candidates, or candidates that asked for no adaptation. */
+    public static final java.util.concurrent.atomic.AtomicLong BEARD_CANDIDATES =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong BEARD_NO_ADAPTATION_RECORDED =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong BEARD_ADAPTATION_NONE =
+            new java.util.concurrent.atomic.AtomicLong();
     /** Air counted in a handful of bearded cubes, to compare against the stratum average. */
     public static final java.util.concurrent.atomic.AtomicLong BEARD_SAMPLE_COUNT =
             new java.util.concurrent.atomic.AtomicLong();

@@ -859,8 +859,12 @@ public final class ExtensionCubeManager {
         long bearded = DeepStructures.BEARDED_CUBES.get();
         long sampled = DeepStructures.BEARD_SAMPLE_COUNT.get();
         CubicChunks.LOGGER.info("[CubicChunks]   terrain density raised around structures in {} cubes"
-                + " ({} pieces); air left by generation in {} sampled bearded cubes: {} per 1k",
-                bearded, DeepStructures.BEARD_RIGIDS.get(), sampled,
+                + " ({} pieces); candidates seen {} - {} with no adaptation recorded, {} asking for"
+                + " none; air left by generation in {} sampled bearded cubes: {} per 1k",
+                bearded, DeepStructures.BEARD_RIGIDS.get(),
+                DeepStructures.BEARD_CANDIDATES.get(),
+                DeepStructures.BEARD_NO_ADAPTATION_RECORDED.get(),
+                DeepStructures.BEARD_ADAPTATION_NONE.get(), sampled,
                 sampled == 0L ? 0L : DeepStructures.BEARD_SAMPLE_AIR.get() * 1000L / (4096L * sampled));
         if (!DeepStructures.TRANSPLANTED_BY_STRUCTURE.isEmpty()) {
             java.util.List<String> names = new java.util.ArrayList<>(
@@ -1316,13 +1320,19 @@ public final class ExtensionCubeManager {
                 chunkPos.getMinBlockX(), cubeMinY, chunkPos.getMinBlockZ(),
                 chunkPos.getMinBlockX() + 15, cubeMinY + 15, chunkPos.getMinBlockZ() + 15);
         candidates.addAll(transplantedPieces(chunkPos, stratumOf(sectionY), cubeBox));
+        DeepStructures.BEARD_CANDIDATES.addAndGet(candidates.size());
         if (candidates.isEmpty()) {
             return java.util.List.of();
         }
         java.util.List<net.minecraft.world.level.levelgen.Beardifier.Rigid> rigids = new java.util.ArrayList<>();
         for (StructurePiece piece : candidates) {
             net.minecraft.world.level.levelgen.structure.TerrainAdjustment adaptation = this.pieceAdaptations.get(piece);
-            if (adaptation == null || adaptation == net.minecraft.world.level.levelgen.structure.TerrainAdjustment.NONE) {
+            if (adaptation == null) {
+                DeepStructures.BEARD_NO_ADAPTATION_RECORDED.incrementAndGet();
+                continue;
+            }
+            if (adaptation == net.minecraft.world.level.levelgen.structure.TerrainAdjustment.NONE) {
+                DeepStructures.BEARD_ADAPTATION_NONE.incrementAndGet();
                 continue; // vanilla leaves these alone too
             }
             rigids.add(new net.minecraft.world.level.levelgen.Beardifier.Rigid(piece.getBoundingBox(), adaptation, 0));
