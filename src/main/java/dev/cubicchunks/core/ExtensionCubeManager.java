@@ -460,6 +460,7 @@ public final class ExtensionCubeManager {
         debugColumnSaveBreakdown(spawn);
         debugReportBiomeProfile(columns);
         debugReportStructures(columns);
+        debugReportFeatureStats();
         debugReportCubeComposition(spawn);
         this.profileCost = false;
     }
@@ -1772,8 +1773,9 @@ public final class ExtensionCubeManager {
                     if (!this.warnedFeaturePassTooWide) {
                         this.warnedFeaturePassTooWide = true;
                         CubicChunks.LOGGER.warn(
-                                "[CubicChunks] a feature pass reached further than the tile cache can"
-                                        + " hold ({}); later passes of this shape are skipped",
+                                "[CubicChunks] a position from a feature pass fell outside the tile"
+                                        + " index for that feature ({}); the position is dropped, other"
+                                        + " positions of the same pass are unaffected",
                                 holder.unwrapKey().map(k -> k.identifier().toString()).orElse("?"));
                     }
                     return;
@@ -2045,11 +2047,25 @@ public final class ExtensionCubeManager {
                     continue;
                 }
                 if (!isStratumEligible(placed)) {
-                    recordFeatureSkipped(holder, hasHeightmapPlacement(placed)
-                            ? "skipped: anchored to the terrain surface (heightmap placement)"
-                            : "skipped: no height-range placement to tile");
-                    innerIndex++;
-                    continue;
+                    if (hasHeightmapPlacement(placed)) {
+                        recordFeatureSkipped(holder, "skipped: anchored to the terrain surface (heightmap placement)");
+                        innerIndex++;
+                        continue;
+                    }
+                    if (isOreOrDiskFeature(holder)) {
+                        // An ore with no vertical placement modifier of its own - which is how a lot of
+                        // modded ores are declared: a count, maybe in_square, a biome check, and the
+                        // height left to the generation context. There is nothing to tile, so run it
+                        // for this cube with the depth bonus applied, which is the same path an
+                        // unmeasurable pass already takes. Excluding these was why some modded ores
+                        // never appeared below the band at all.
+                        spanOfFeature.put(placed, -1);
+                        vminOfFeature.put(placed, cubeMinY);
+                    } else {
+                        recordFeatureSkipped(holder, "skipped: no height-range placement to tile");
+                        innerIndex++;
+                        continue;
+                    }
                 }
                 // lava policy: vanilla lava springs must not place lava outside the near-floor zone
                 if (isLavaSpring(holder) && cubeMinY > lavaZoneTop()) {
