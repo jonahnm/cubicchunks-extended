@@ -1145,8 +1145,18 @@ public final class ExtensionCubeManager {
 
         phaseStart = System.nanoTime();
         SectionPos sectionPos = SectionPos.of(chunk.getPos(), sectionY);
-        // notify the light engine: new non-empty (or emptier) section
-        level.getChunkSource().getLightEngine().updateSectionStatus(sectionPos, section.hasOnlyAir());
+        // Notify the light engine that a section changed. The engine keeps its own storage, keyed by
+        // section, and sizes it from the level's height range as it was when the engine was built.
+        // A section outside that range has no storage entry, and vanilla's light propagation
+        // dereferences the layer without checking (LayerLightSectionStorage#getStoredLevel), which
+        // faults on a light worker thread and takes the server down at random during startup. Only
+        // sections the engine actually tracks are announced here; the rest are lit when the chunk is
+        // sent, which builds the packet's light from the same engine.
+        int minSection = net.minecraft.core.SectionPos.blockToSectionCoord(level.getMinY());
+        int maxSection = net.minecraft.core.SectionPos.blockToSectionCoord(level.getMinY() + level.getHeight());
+        if (sectionY >= minSection && sectionY < maxSection) {
+            level.getChunkSource().getLightEngine().updateSectionStatus(sectionPos, section.hasOnlyAir());
+        }
 
         persistGeneratedMarker(chunk.getPos(), chunk);
         markPhase(PHASE_TAIL, stratum, phaseStart);
