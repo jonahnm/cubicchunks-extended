@@ -846,6 +846,12 @@ public final class ExtensionCubeManager {
                 DeepStructures.TRANSPLANT_SOURCES_UNLOADED.get(),
                 DeepStructures.TRANSPLANT_PIECES_PLACED.get());
         CubicChunks.LOGGER.info("[CubicChunks]   light: {}", dev.cubicchunks.core.LightProbe.summary());
+        long bearded = DeepStructures.BEARDED_CUBES.get();
+        long sampled = DeepStructures.BEARD_SAMPLE_COUNT.get();
+        CubicChunks.LOGGER.info("[CubicChunks]   terrain density raised around structures in {} cubes"
+                + " ({} pieces); air left by generation in {} sampled bearded cubes: {} per 1k",
+                bearded, DeepStructures.BEARD_RIGIDS.get(), sampled,
+                sampled == 0L ? 0L : DeepStructures.BEARD_SAMPLE_AIR.get() * 1000L / (4096L * sampled));
         if (!DeepStructures.TRANSPLANTED_BY_STRUCTURE.isEmpty()) {
             java.util.List<String> names = new java.util.ArrayList<>(
                     DeepStructures.TRANSPLANTED_BY_STRUCTURE.keySet());
@@ -1186,9 +1192,28 @@ public final class ExtensionCubeManager {
         this.profileStratum = stratum;
         this.generator.setProfileStratum(stratum);
         long phaseStart = System.nanoTime();
+        java.util.List<net.minecraft.world.level.levelgen.Beardifier.Rigid> structureRigids = structureRigidsFor(chunk, sectionY);
         LevelChunkSection section = pregenerated != null
                 ? pregenerated
-                : generator.generateCube(chunk, sectionY);
+                : generator.generateCube(chunk, sectionY, structureRigids);
+        // Counted here, before the merge, features or piece placement touch the section: this is the
+        // air that terrain generation left in a cube whose density was raised around a structure.
+        // Compare it with the same stratum's average from the block census and the effect of the
+        // beard is visible or it is not.
+        if (!structureRigids.isEmpty()) {
+            DeepStructures.BEARDED_CUBES.incrementAndGet();
+            DeepStructures.BEARD_RIGIDS.addAndGet(structureRigids.size());
+            if (DeepStructures.BEARD_SAMPLE_COUNT.get() < 40L && section != null) {
+                DeepStructures.BEARD_SAMPLE_COUNT.incrementAndGet();
+                final int[] airCount = new int[1];
+                section.getStates().count((state, count) -> {
+                    if (state.isAir()) {
+                        airCount[0] += count;
+                    }
+                });
+                DeepStructures.BEARD_SAMPLE_AIR.addAndGet(airCount[0]);
+            }
+        }
         if (pregenerated != null) {
             addPhase(PHASE_NOISE, stratum, noiseNanos);
         } else {
@@ -1256,6 +1281,40 @@ public final class ExtensionCubeManager {
      * column: asking {@link StructureManager} for starts (and scanning every piece of every start)
      * for each cube would load neighbour chunks and cost cubes x pieces.
      */
+    /**
+     * The terrain adaptations vanilla would apply around the structures this cube is about to
+     * receive. Computed before the cube's noise is sampled, which is the whole point: vanilla raises
+     * density around a structure's bounding box so caves do not cut through it, and that only works
+     * while terrain is being generated. Doing it afterwards - which is what placing pieces does -
+     * leaves a mineshaft standing inside a cave that was carved as though the shaft were not there,
+     * with its floor missing and its supports hanging in void.
+     */
+    private java.util.List<net.minecraft.world.level.levelgen.Beardifier.Rigid> structureRigidsFor(LevelChunk chunk, int sectionY) {
+        java.util.List<StructurePiece> candidates = new java.util.ArrayList<>();
+        java.util.List<StructurePiece> own = pieceIndexForColumn(chunk).get(sectionY);
+        if (own != null) {
+            candidates.addAll(own);
+        }
+        ChunkPos chunkPos = chunk.getPos();
+        int cubeMinY = sectionY << 4;
+        BoundingBox cubeBox = new BoundingBox(
+                chunkPos.getMinBlockX(), cubeMinY, chunkPos.getMinBlockZ(),
+                chunkPos.getMinBlockX() + 15, cubeMinY + 15, chunkPos.getMinBlockZ() + 15);
+        candidates.addAll(transplantedPieces(chunkPos, stratumOf(sectionY), cubeBox));
+        if (candidates.isEmpty()) {
+            return java.util.List.of();
+        }
+        java.util.List<net.minecraft.world.level.levelgen.Beardifier.Rigid> rigids = new java.util.ArrayList<>();
+        for (StructurePiece piece : candidates) {
+            net.minecraft.world.level.levelgen.structure.TerrainAdjustment adaptation = this.pieceAdaptations.get(piece);
+            if (adaptation == null || adaptation == net.minecraft.world.level.levelgen.structure.TerrainAdjustment.NONE) {
+                continue; // vanilla leaves these alone too
+            }
+            rigids.add(new net.minecraft.world.level.levelgen.Beardifier.Rigid(piece.getBoundingBox(), adaptation, 0));
+        }
+        return rigids;
+    }
+
     private void placeStructurePieces(LevelChunk chunk, int sectionY) {
         if (!CubicConfig.DEEP_STRUCTURES.get()) {
             return;
@@ -1303,6 +1362,14 @@ public final class ExtensionCubeManager {
      * keeps streaming nearby columns, so the cost is paid once per source, not once per cube. */
     /** Set true only by the measurement run that proves a transplanted piece can reach a cube. */
     private static final boolean TEMPORARY_ALLOW_SURFACE = false;
+
+    /**
+     * The terrain adaptation each known piece's structure asks for (beard thin, beard box,
+     * encapsulate). Vanilla reads this from the start while building a beardifier; a piece held on
+     * its own cannot answer that, so it is recorded at the moment the piece is taken from a start.
+     */
+    private final java.util.Map<StructurePiece, net.minecraft.world.level.levelgen.structure.TerrainAdjustment> pieceAdaptations =
+            java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
 
     private final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<java.util.List<StructurePiece>> transplantCache =
             new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
@@ -1354,6 +1421,7 @@ public final class ExtensionCubeManager {
                         continue;
                     }
                     String structureName = DeepStructures.structureKey(start, level.registryAccess());
+                    net.minecraft.world.level.levelgen.structure.TerrainAdjustment adaptation = start.getStructure().terrainAdaptation();
                     for (StructurePiece piece : start.getPieces()) {
                         BoundingBox box = piece.getBoundingBox();
                         // Only structures that reach below the surface. A village is a structure too,
@@ -1370,6 +1438,7 @@ public final class ExtensionCubeManager {
                                 (target.x() - (source.x() + dx)) * 16, shift,
                                 (target.z() - (source.z() + dz)) * 16);
                         if (copy != null && (cubeBox == null || copy.getBoundingBox().intersects(cubeBox))) {
+                            this.pieceAdaptations.put(copy, adaptation);
                             pieces.add(copy);
                             DeepStructures.TRANSPLANTED_BY_STRUCTURE
                                     .computeIfAbsent(structureName,
@@ -1403,7 +1472,9 @@ public final class ExtensionCubeManager {
                     if (start == null || !start.isValid()) {
                         continue;
                     }
+                    net.minecraft.world.level.levelgen.structure.TerrainAdjustment adaptation = start.getStructure().terrainAdaptation();
                     for (StructurePiece piece : start.getPieces()) {
+                        this.pieceAdaptations.put(piece, adaptation);
                         BoundingBox bb = piece.getBoundingBox();
                         // BoundingBox keeps its bounds private; the corners give the Y span.
                         int[] ySpan = {Integer.MAX_VALUE, Integer.MIN_VALUE};

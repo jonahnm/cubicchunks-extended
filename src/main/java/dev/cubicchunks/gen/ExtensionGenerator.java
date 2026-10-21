@@ -76,6 +76,19 @@ public final class ExtensionGenerator {
     }
 
     /** Exposes {@link NoiseChunk#getInterpolatedState()} (protected) for our cube fill loop. */
+    /** A beardifier from pieces this mod knows about, assembled the way vanilla assembles its own. */
+    private static net.minecraft.world.level.levelgen.Beardifier beardAround(java.util.List<net.minecraft.world.level.levelgen.Beardifier.Rigid> rigids) {
+        net.minecraft.world.level.levelgen.structure.BoundingBox any = null;
+        for (net.minecraft.world.level.levelgen.Beardifier.Rigid rigid : rigids) {
+            any = any == null ? rigid.box() : net.minecraft.world.level.levelgen.structure.BoundingBox
+                    .encapsulating(any, rigid.box());
+        }
+        if (any == null) {
+            return net.minecraft.world.level.levelgen.Beardifier.EMPTY;
+        }
+        return new net.minecraft.world.level.levelgen.Beardifier(java.util.List.copyOf(rigids), java.util.List.of(), any.inflatedBy(24));
+    }
+
     private static final class CubeNoiseChunk extends NoiseChunk {
         CubeNoiseChunk(int cellCountXZ, RandomState randomState, int blockX, int blockZ,
                 NoiseSettings noiseSettings, DensityFunctions.BeardifierOrMarker beardifier,
@@ -185,8 +198,9 @@ public final class ExtensionGenerator {
      * Generates the extension cube (16x16x16) at {@code sectionY} of the given column and returns
      * it; the caller installs it into the chunk.
      */
-    public LevelChunkSection generateCube(LevelChunk chunk, int sectionY) {
-        return generateWindow(chunk, sectionY, 1)[0];
+    public LevelChunkSection generateCube(LevelChunk chunk, int sectionY,
+            java.util.List<net.minecraft.world.level.levelgen.Beardifier.Rigid> structureRigids) {
+        return generateWindow(chunk, sectionY, 1, structureRigids)[0];
     }
 
     /**
@@ -203,7 +217,8 @@ public final class ExtensionGenerator {
      * @param firstSectionY section Y of the first (shallowest) cube of the run
      * @param count         how many contiguous cubes to build
      */
-    public LevelChunkSection[] generateWindow(LevelChunk chunk, int firstSectionY, int count) {
+    public LevelChunkSection[] generateWindow(LevelChunk chunk, int firstSectionY, int count,
+            java.util.List<net.minecraft.world.level.levelgen.Beardifier.Rigid> structureRigids) {
         int windowMinY = firstSectionY << 4;
         int windowHeight = count << 4;
         ChunkPos chunkPos = chunk.getPos();
@@ -223,7 +238,7 @@ public final class ExtensionGenerator {
         addSub(SUB_CONTAINERS, phaseStart);
 
         if (settings != null) {
-            fillFromVanillaNoise(chunk, windowMinY, windowHeight, states);
+            fillFromVanillaNoise(chunk, windowMinY, windowHeight, states, structureRigids);
         } else {
             fillFallback(windowMinY, windowHeight, states);
         }
@@ -248,7 +263,8 @@ public final class ExtensionGenerator {
     }
 
     private void fillFromVanillaNoise(
-            LevelChunk chunk, int windowMinY, int windowHeight, PalettedContainer<BlockState>[] states) {
+            LevelChunk chunk, int windowMinY, int windowHeight, PalettedContainer<BlockState>[] states,
+            java.util.List<net.minecraft.world.level.levelgen.Beardifier.Rigid> structureRigids) {
         NoiseSettings base = settings.noiseSettings();
         NoiseSettings cubeSettings =
                 new NoiseSettings(windowMinY, windowHeight, base.noiseSizeHorizontal(), base.noiseSizeVertical());
@@ -268,8 +284,15 @@ public final class ExtensionGenerator {
         ChunkPos chunkPos = chunk.getPos();
         // real Beardifier: terrain adaptation (beard) around deep structure pieces
         long phaseStart = System.nanoTime();
-        var beardifier = net.minecraft.world.level.levelgen.Beardifier.forStructuresInChunk(
-                level.structureManager(), chunkPos);
+        // Built from the pieces this cube is actually going to receive. The lookup vanilla offers
+        // only knows about structures the structure manager has been told about, and the deep pieces
+        // this mod places are not registered there - which is why terrain came out unmodified around
+        // them. Falling back to vanilla's lookup when nothing is known keeps band structures working
+        // as they did.
+        var beardifier = structureRigids != null && !structureRigids.isEmpty()
+                ? beardAround(structureRigids)
+                : net.minecraft.world.level.levelgen.Beardifier.forStructuresInChunk(
+                        level.structureManager(), chunkPos);
         addSub(SUB_BEARDIFIER, phaseStart);
         phaseStart = System.nanoTime();
         CubeNoiseChunk noiseChunk = new CubeNoiseChunk(
@@ -687,7 +710,10 @@ public final class ExtensionGenerator {
                 if (mismatchesInSection == 0) {
                     continue;
                 }
-                LevelChunkSection fresh = generateCube(chunk, sectionY);
+                // An empty list means "fall back to vanilla's own lookup", which is what this
+                // comparison did before: a cube whose beard comes from pieces this mod knows about
+                // cannot be reconstructed here, because the pieces live in the cube manager.
+                LevelChunkSection fresh = generateCube(chunk, sectionY, java.util.List.of());
                 int freshVsInstalled = 0;
                 for (int lx = 0; lx < 16; lx++) {
                     for (int ly = 0; ly < 16; ly++) {

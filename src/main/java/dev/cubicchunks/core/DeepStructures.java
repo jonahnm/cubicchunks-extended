@@ -51,6 +51,16 @@ public final class DeepStructures {
             new java.util.concurrent.atomic.AtomicLong();
     /** Source columns that were not loaded. Transplants are only read from loaded columns, so this
      * is the number of structures that were not placed because their source was out of range. */
+    /** How many cubes had their terrain raised around a structure this mod intends to place. */
+    public static final java.util.concurrent.atomic.AtomicLong BEARDED_CUBES =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong BEARD_RIGIDS =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Air counted in a handful of bearded cubes, to compare against the stratum average. */
+    public static final java.util.concurrent.atomic.AtomicLong BEARD_SAMPLE_COUNT =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong BEARD_SAMPLE_AIR =
+            new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong TRANSPLANT_SOURCES_UNLOADED =
             new java.util.concurrent.atomic.AtomicLong();
     /** The height range structures actually land in, measured as they are generated. Extending a
