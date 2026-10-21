@@ -37,6 +37,13 @@ public final class DeepStructures {
             new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DEEP_PIECES_COPIED =
             new java.util.concurrent.atomic.AtomicLong();
+    /** Counted at the moment vanilla's structure stage finishes for a chunk, i.e. before anything
+     * this mod later does to that chunk. Comparing these with what a later scan of live chunks
+     * reports tells starts-not-created apart from starts-not-retained. */
+    public static final java.util.concurrent.atomic.AtomicLong STARTS_SEEN_AT_GENERATION =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong CHUNKS_WITH_STARTS_AT_GENERATION =
+            new java.util.concurrent.atomic.AtomicLong();
 
     private DeepStructures() {}
 
@@ -54,6 +61,16 @@ public final class DeepStructures {
             return;
         }
         STRUCTURE_STAGE_CALLS.incrementAndGet();
+        int present = 0;
+        for (StructureStart start : chunk.getAllStarts().values()) {
+            if (start != null && start.isValid()) {
+                present++;
+            }
+        }
+        if (present > 0) {
+            CHUNKS_WITH_STARTS_AT_GENERATION.incrementAndGet();
+            STARTS_SEEN_AT_GENERATION.addAndGet(present);
+        }
         SectionPos sectionPos = SectionPos.bottomOf(chunk);
         ChunkPos chunkPos = chunk.getPos();
         // IMPORTANT: read the chunk's OWN structure marks only. structureManager.startsForStructure()
