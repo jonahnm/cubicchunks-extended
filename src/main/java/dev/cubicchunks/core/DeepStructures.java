@@ -60,6 +60,13 @@ public final class DeepStructures {
     public static volatile int GEN_MIN_Y = Integer.MAX_VALUE;
     public static volatile int GEN_MAX_Y = Integer.MIN_VALUE;
     public static volatile int GEN_PIECE_COUNT;
+    /** Transplanted pieces grouped by the structure they came from, so a modded structure shows up
+     * in its own right instead of being hidden inside "the feature works". */
+    private static final java.util.Set<String> UNRECOGNISED_PIECE_TYPES =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    public static final java.util.concurrent.ConcurrentHashMap<String,
+            java.util.concurrent.atomic.AtomicLong> TRANSPLANTED_BY_STRUCTURE =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private DeepStructures() {}
 
@@ -143,14 +150,28 @@ public final class DeepStructures {
 
     /** Deep-copies a piece via its NBT round-trip, translating its bounding box (and pivot). */
     public static StructurePiece copyTranslated(StructurePiece piece, RegistryAccessHolder holder, int shift) {
+        return copyTranslated(piece, holder, 0, shift, 0);
+    }
+
+    public static StructurePiece copyTranslated(
+            StructurePiece piece, RegistryAccessHolder holder, int dx, int shift, int dz) {
         try {
             CompoundTag tag = piece.createTag(holder.context());
-            shiftTagY(tag, shift);
+            shiftTag(tag, dx, shift, dz);
             String id = tag.getString("id").map(s -> s.toLowerCase(java.util.Locale.ROOT)).orElse("");
             Identifier rl = Identifier.parse(id);
             rl = rename(rl);
             var type = BuiltInRegistries.STRUCTURE_PIECE.getValue(rl);
             if (type == null) {
+                // A modded structure whose piece type is not in the structure-piece registry would
+                // otherwise disappear with nothing said about it, which is the one way this path can
+                // quietly lose a structure a mod added. Named once per id so it is visible without
+                // turning into spam.
+                if (UNRECOGNISED_PIECE_TYPES.add(rl.toString())) {
+                    dev.cubicchunks.CubicChunks.LOGGER.warn(
+                            "[CubicChunks] no structure piece type registered for {} - a structure"
+                                    + " using it will not be reproduced below the band", rl);
+                }
                 return null;
             }
             return type.load(holder.context(), tag);
@@ -204,23 +225,34 @@ public final class DeepStructures {
         return new ChunkPos(target.x() + offX, target.z() + offZ);
     }
 
-    /** Shifts the Y components of the piece's "BB" (int array of 6) and "TP"/"POS" pivots. */
-    private static void shiftTagY(CompoundTag tag, int shift) {
+    /**
+     * Shifts a piece's "BB" bounding box and its "TP"/"POS" pivot, on all three axes.
+     *
+     * The horizontal part matters as much as the vertical one. A stratum's structure comes from a
+     * different band column than the cube it is being placed into, so a Y-only shift leaves the
+     * piece sitting over its source column and it never intersects the cube being generated -
+     * measured, 66 pieces collected and 0 placed. Moving it by the same number of chunks it was
+     * read from is what puts it in the cube.
+     */
+    private static void shiftTag(CompoundTag tag, int dx, int dy, int dz) {
         int[] bb = tag.getIntArray("BB").orElse(null);
-        if (bb != null) {
-            if (bb.length >= 6) {
-                bb[1] += shift;
-                bb[4] += shift;
-                tag.putIntArray("BB", bb);
-            }
+        if (bb != null && bb.length >= 6) {
+            // BB is [minX, minY, minZ, maxX, maxY, maxZ].
+            bb[0] += dx;
+            bb[1] += dy;
+            bb[2] += dz;
+            bb[3] += dx;
+            bb[4] += dy;
+            bb[5] += dz;
+            tag.putIntArray("BB", bb);
         }
         for (String key : new String[] {"TP", "POS"}) {
             int[] piv = tag.getIntArray(key).orElse(null);
-            if (piv != null) {
-                if (piv.length >= 3) {
-                    piv[1] += shift;
-                    tag.putIntArray(key, piv);
-                }
+            if (piv != null && piv.length >= 3) {
+                piv[0] += dx;
+                piv[1] += dy;
+                piv[2] += dz;
+                tag.putIntArray(key, piv);
             }
         }
     }
@@ -233,5 +265,23 @@ public final class DeepStructures {
         var server = net.neoforged.neoforge.server.ServerLifecycleHooks.getCurrentServer();
         var resourceManager = server != null ? server.getResourceManager() : null;
         return new StructurePieceSerializationContext(resourceManager, registryAccess, templateManager);
+    }
+
+    /**
+     * The registry name of a start's structure, for diagnostics only. The structure registry is not
+     * in BuiltInRegistries, so it is reached through the level's own registry access - which also
+     * means a modded structure reports under its own namespace, which is the point.
+     */
+    public static String structureKey(
+            StructureStart start, net.minecraft.core.RegistryAccess registryAccess) {
+        try {
+            net.minecraft.core.Registry<net.minecraft.world.level.levelgen.structure.Structure> registry =
+                    registryAccess.lookupOrThrow(
+                            net.minecraft.core.registries.Registries.STRUCTURE);
+            net.minecraft.resources.Identifier id = registry.getKey(start.getStructure());
+            return id == null ? "[unregistered]" : id.toString();
+        } catch (RuntimeException e) {
+            return start.getStructure().getClass().getSimpleName();
+        }
     }
 }

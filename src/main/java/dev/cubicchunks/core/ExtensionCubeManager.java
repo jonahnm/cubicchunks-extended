@@ -819,7 +819,7 @@ public final class ExtensionCubeManager {
                     // itself rather than a holder, so there is no identifier to read from it here.
                     // Which kinds of piece exist, and how deep they reach, is what this diagnostic is
                     // after.
-                    String id = piece.getClass().getSimpleName();
+                    String id = DeepStructures.structureKey(start, level.registryAccess());
                     int[] row = tally.computeIfAbsent(id, i ->
                             new int[] {0, 0, 0, Integer.MAX_VALUE, Integer.MIN_VALUE});
                     row[0]++;
@@ -844,6 +844,19 @@ public final class ExtensionCubeManager {
                 + " {} pieces placed", DeepStructures.TRANSPLANT_SOURCE_LOOKUPS.get(),
                 DeepStructures.TRANSPLANT_SOURCES_UNLOADED.get(),
                 DeepStructures.TRANSPLANT_PIECES_PLACED.get());
+        if (!DeepStructures.TRANSPLANTED_BY_STRUCTURE.isEmpty()) {
+            java.util.List<String> names = new java.util.ArrayList<>(
+                    DeepStructures.TRANSPLANTED_BY_STRUCTURE.keySet());
+            names.sort((a, b) -> Long.compare(
+                    DeepStructures.TRANSPLANTED_BY_STRUCTURE.get(b).longValue(),
+                    DeepStructures.TRANSPLANTED_BY_STRUCTURE.get(a).longValue()));
+            StringBuilder line = new StringBuilder();
+            for (String name : names.subList(0, Math.min(12, names.size()))) {
+                line.append(' ').append(name).append('=')
+                        .append(DeepStructures.TRANSPLANTED_BY_STRUCTURE.get(name).longValue());
+            }
+            CubicChunks.LOGGER.info("[CubicChunks]   transplanted by structure:{}", line);
+        }
         for (java.util.Map.Entry<String, int[]> entry : tally.entrySet()) {
             int[] row = entry.getValue();
             CubicChunks.LOGGER.info("[CubicChunks]   {} : {} pieces, {} below the band, {} starts,"
@@ -1251,16 +1264,16 @@ public final class ExtensionCubeManager {
         if (own != null) {
             pieces.addAll(own);
         }
-        // Structures of this stratum, taken from the band column this slice maps to.
-        pieces.addAll(transplantedPieces(chunk.getPos(), stratumOf(sectionY)));
-        if (pieces.isEmpty()) {
-            return;
-        }
         ChunkPos chunkPos = chunk.getPos();
         int cubeMinY = sectionY << 4;
         BoundingBox cubeBox = new BoundingBox(
                 chunkPos.getMinBlockX(), cubeMinY, chunkPos.getMinBlockZ(),
                 chunkPos.getMinBlockX() + 15, cubeMinY + 15, chunkPos.getMinBlockZ() + 15);
+        // Structures of this stratum, taken from the band column this slice maps to.
+        pieces.addAll(transplantedPieces(chunkPos, stratumOf(sectionY), cubeBox));
+        if (pieces.isEmpty()) {
+            return;
+        }
         var structureManager = level.structureManager();
         for (StructurePiece piece : pieces) {
             if (!piece.getBoundingBox().intersects(cubeBox)) {
@@ -1286,11 +1299,14 @@ public final class ExtensionCubeManager {
     /** Section Y -> pieces, built from the starts of this and any already-loaded neighbour column. */
     /** Transplanted pieces per (source column, stratum): the same source is reused while a player
      * keeps streaming nearby columns, so the cost is paid once per source, not once per cube. */
+    /** Set true only by the measurement run that proves a transplanted piece can reach a cube. */
+    private static final boolean TEMPORARY_ALLOW_SURFACE = false;
+
     private final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<java.util.List<StructurePiece>> transplantCache =
             new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
 
 
-    private java.util.List<StructurePiece> transplantedPieces(ChunkPos target, int stratum) {
+    private java.util.List<StructurePiece> transplantedPieces(ChunkPos target, int stratum, BoundingBox cubeBox) {
         if (stratum < 1 || !CubicConfig.DEEP_STRUCTURES.get() || !CubicConfig.TRANSPLANT_STRUCTURES.get()) {
             return java.util.Collections.emptyList();
         }
@@ -1335,17 +1351,28 @@ public final class ExtensionCubeManager {
                     if (start == null || !start.isValid()) {
                         continue;
                     }
+                    String structureName = DeepStructures.structureKey(start, level.registryAccess());
                     for (StructurePiece piece : start.getPieces()) {
                         BoundingBox box = piece.getBoundingBox();
                         // Only structures that reach below the surface. A village is a structure too,
                         // and a village at y=-900 is not what "underground structures" means.
-                        if (box.minY() >= 0) {
+                        if (!TEMPORARY_ALLOW_SURFACE && box.minY() >= 0) {
                             continue;
                         }
+                        // The piece came from a different column than this cube's. Because a
+                        // stratum's mapping is a pure translation, the distance back to the cube's
+                        // column is the same for every cube that asks for this source, so the cached
+                        // list stays valid and the piece lands over the column that asked for it.
                         StructurePiece copy = DeepStructures.copyTranslated(
-                                piece, new DeepStructures.RegistryAccessHolder(context), shift);
-                        if (copy != null) {
+                                piece, new DeepStructures.RegistryAccessHolder(context),
+                                (target.x() - (source.x() + dx)) * 16, shift,
+                                (target.z() - (source.z() + dz)) * 16);
+                        if (copy != null && (cubeBox == null || copy.getBoundingBox().intersects(cubeBox))) {
                             pieces.add(copy);
+                            DeepStructures.TRANSPLANTED_BY_STRUCTURE
+                                    .computeIfAbsent(structureName,
+                                            k -> new java.util.concurrent.atomic.AtomicLong())
+                                    .incrementAndGet();
                         }
                     }
                 }
