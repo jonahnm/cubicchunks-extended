@@ -21,4 +21,5 @@ public final class WorldGenState {
     public static final ThreadLocal<Boolean> REMAP_DEEP_BIOMES = ThreadLocal.withInitial(() -> false);
     public static final ThreadLocal<Integer> REMAP_BAND_MIN_Y = ThreadLocal.withInitial(() -> 0);
     public static final ThreadLocal<Integer> REMAP_WORLD_MIN_Y = ThreadLocal.withInitial(() -> 0);
+    public static final ThreadLocal<Integer> REMAP_BAND_HEIGHT = ThreadLocal.withInitial(() -> 0);
 }

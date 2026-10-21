@@ -667,12 +667,132 @@ public final class ExtensionCubeManager {
      * spots inside each section rather than one shows whether a layer is uniform or carries the
      * patches the profile is meant to produce.
      */
+    /**
+     * Reads the dimension's own biome field - no extension mapping applied - over a coarse grid, and
+     * reports which biomes appear at which heights. That is how a modded biome's own region can be
+     * found: whatever the band selects at a given height is what the deep world has to be able to
+     * reach, because the deep world is sampled at band heights on purpose.
+     *
+     * @param centre   the column to scan outward from
+     * @param chunks   half-width of the scan, in chunks
+     * @param sliceYs  block Y values to probe
+     */
+    public void debugScanBiomeField(ChunkPos centre, int chunks, int[] sliceYs) {
+        java.util.Map<String, int[]> seen = new java.util.TreeMap<>();
+        java.util.Map<String, String> where = new java.util.HashMap<>();
+        // The pool is what vanilla's picker is allowed to answer with. Modded biomes can only
+        // appear below the band if they are in it, because the extension asks this same source.
+        java.util.List<String> pool = new java.util.ArrayList<>();
+        for (net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> holder
+                : generator.biomeSourceForDiagnostics().possibleBiomes()) {
+            String id = holder.unwrapKey().map(k -> k.identifier().toString()).orElse("[unregistered]");
+            if (!id.startsWith("minecraft:")) {
+                pool.add(id);
+            }
+        }
+        java.util.Collections.sort(pool);
+        CubicChunks.LOGGER.info("[CubicChunks]   the dimension's biome pool adds {} non-vanilla biomes: {}",
+                pool.size(), pool);
+        int columns = 0;
+        for (int dx = 0; dx <= chunks * 32; dx += 32) {
+            for (int dz = 0; dz <= chunks * 32; dz += 32) {
+                columns++;
+                int bx = centre.getMinBlockX() + dx;
+                int bz = centre.getMinBlockZ() + dz;
+                for (int s = 0; s < sliceYs.length; s++) {
+                    net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> biome = level.getBiome(
+                            new net.minecraft.core.BlockPos(bx, sliceYs[s], bz));
+                    String id = biome.unwrapKey().map(k -> k.identifier().toString()).orElse("[unregistered]");
+                    int[] tally = seen.computeIfAbsent(id, i -> new int[sliceYs.length]);
+                    tally[s]++;
+                    if (where.get(id) == null) {
+                        where.put(id, bx + "," + sliceYs[s] + "," + bz);
+                    }
+                }
+            }
+        }
+        // The same question on the extension's side: what does the mapping resolve to at real deep
+        // heights, through the code path cube generation uses. A modded biome that vanilla selects
+        // inside the band has to show up here too, or the fix is not working.
+        net.minecraft.world.level.biome.BiomeSource source = generator.biomeSourceForDiagnostics();
+        net.minecraft.world.level.biome.Climate.Sampler sampler = generator.samplerForDiagnostics();
+        int[] deepSlices = new int[]{-100, -300, -600, -1000};
+        if (source != null && sampler != null) {
+            java.util.Map<String, int[]> deep = new java.util.TreeMap<>();
+            dev.cubicchunks.worldgen.WorldGenState.REMAP_DEEP_BIOMES.set(true);
+            dev.cubicchunks.worldgen.WorldGenState.REMAP_BAND_MIN_Y.set(generator.bandMinY());
+            dev.cubicchunks.worldgen.WorldGenState.REMAP_WORLD_MIN_Y.set(level.getMinY());
+            dev.cubicchunks.worldgen.WorldGenState.REMAP_BAND_HEIGHT.set(
+                    generator.bandMaxY() - generator.bandMinY());
+            try {
+                for (int dx = 0; dx <= chunks * 32; dx += 32) {
+                    for (int dz = 0; dz <= chunks * 32; dz += 32) {
+                        int bx = centre.getMinBlockX() + dx;
+                        int bz = centre.getMinBlockZ() + dz;
+                        for (int s = 0; s < deepSlices.length; s++) {
+                            net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> biome =
+                                    source.getNoiseBiome(net.minecraft.core.QuartPos.fromBlock(bx),
+                                            net.minecraft.core.QuartPos.fromBlock(deepSlices[s]),
+                                            net.minecraft.core.QuartPos.fromBlock(bz), sampler);
+                            String id = biome.unwrapKey().map(k -> k.identifier().toString())
+                                    .orElse("[unregistered]");
+                            deep.computeIfAbsent(id, i -> new int[deepSlices.length])[s]++;
+                        }
+                    }
+                }
+            } finally {
+                dev.cubicchunks.worldgen.WorldGenState.REMAP_DEEP_BIOMES.set(false);
+            }
+            CubicChunks.LOGGER.info("[CubicChunks] extension-mapped biomes below the band at y {}: {}"
+                    .replace("{}", "{}"), java.util.Arrays.toString(deepSlices), deep.size());
+            for (java.util.Map.Entry<String, int[]> entry : deep.entrySet()) {
+                StringBuilder line = new StringBuilder();
+                for (int s = 0; s < deepSlices.length; s++) {
+                    if (entry.getValue()[s] > 0) {
+                        line.append(" y=").append(deepSlices[s]).append(':').append(entry.getValue()[s]);
+                    }
+                }
+                CubicChunks.LOGGER.info("[CubicChunks]   {}{} at {}",
+                        entry.getKey().startsWith("minecraft:") ? "" : "MODDED ", entry.getKey(), line);
+            }
+        }
+
+        CubicChunks.LOGGER.info("[CubicChunks] biome field scan over {} columns at y {}: {}", columns,
+                java.util.Arrays.toString(sliceYs), sliceYs.length);
+        java.util.List<String> ids = new java.util.ArrayList<>(seen.keySet());
+        ids.sort((a, b) -> Integer.compare(sum(seen.get(b)), sum(seen.get(a))));
+        int shown = 0;
+        for (String id : ids) {
+            boolean modded = !id.startsWith("minecraft:");
+            if (!modded && shown >= 8) {
+                continue;
+            }
+            StringBuilder line = new StringBuilder();
+            for (int s = 0; s < sliceYs.length; s++) {
+                if (seen.get(id)[s] > 0) {
+                    line.append(" y=").append(sliceYs[s]).append(':').append(seen.get(id)[s]);
+                }
+            }
+            CubicChunks.LOGGER.info("[CubicChunks]   {}{} at {} first seen{}", modded ? "MODDED " : "", id,
+                    line, where.get(id));
+            shown++;
+        }
+    }
+
+    private static int sum(int[] values) {
+        int total = 0;
+        for (int value : values) {
+            total += value;
+        }
+        return total;
+    }
+
     public void debugReportBiomeProfile(java.util.Collection<ChunkPos> positions) {
         int stratumHeight = Math.max(16, generator.stratumHeight());
-        java.util.Map<String, Integer>[] perStratum = new java.util.Map[MAX_STRATA];
-        for (int i = 0; i < MAX_STRATA; i++) {
-            perStratum[i] = new java.util.HashMap<String, Integer>();
-        }
+        // Key -2 is the band's open-air slice, -1 its underground slice (y < 0), 0.. are the
+        // extension's strata. Comparing -1 with 0 is the biome seam test: the block just below the
+        // band should belong to the same kind of biome as the block just above it.
+        java.util.Map<Integer, java.util.Map<String, Integer>> buckets = new java.util.TreeMap<>();
         // Section biomes are stored at 4-block resolution: the container is indexed 0..3 per axis.
         int[][] probes = {{0, 0, 0}, {3, 1, 0}, {0, 3, 3}, {3, 3, 1}};
         for (ChunkPos pos : positions) {
@@ -691,25 +811,35 @@ public final class ExtensionCubeManager {
                 if (idx < 0 || idx >= chunk.getSections().length) {
                     continue;
                 }
+                int bucket = inBand
+                        ? (SectionPos.sectionToBlockCoord(sy) < 0 ? -1 : -2)
+                        : stratumOf(sy);
+                java.util.Map<String, Integer> tally =
+                        buckets.computeIfAbsent(bucket, b -> new java.util.HashMap<String, Integer>());
                 for (int[] probe : probes) {
                     Holder<Biome> biome = chunk.getSections()[idx].getBiomes().get(probe[0], probe[1], probe[2]);
                     String id = biome.unwrapKey().map(k -> k.identifier().toString()).orElse("[unregistered]");
-                    perStratum[stratumOf(sy)].merge(id, 1, Integer::sum);
+                    tally.merge(id, 1, Integer::sum);
                 }
             }
         }
-        for (int s = 0; s < MAX_STRATA; s++) {
-            if (perStratum[s].isEmpty()) {
+        for (java.util.Map.Entry<Integer, java.util.Map<String, Integer>> entry : buckets.entrySet()) {
+            java.util.Map<String, Integer> tally = entry.getValue();
+            if (tally.isEmpty()) {
                 continue;
             }
-            int topY = generator.bandMinY() - s * stratumHeight;
-            String top = perStratum[s].entrySet().stream()
+            int key = entry.getKey();
+            int topY = key == -2 ? generator.bandMaxY()
+                    : (key == -1 ? 0 : generator.bandMinY() - key * stratumHeight);
+            int bottomY = key == -2 ? 0
+                    : (key == -1 ? generator.bandMinY() : topY - stratumHeight);
+            String top = tally.entrySet().stream()
                     .sorted(java.util.Map.Entry.<String, Integer>comparingByValue().reversed())
                     .limit(5)
                     .map(e -> e.getValue() + "x " + e.getKey())
                     .reduce((a, b) -> a + ", " + b)
                     .orElse("-");
-            CubicChunks.LOGGER.info("[CubicChunks] biomes y {}..{}: {}", topY - stratumHeight, topY, top);
+            CubicChunks.LOGGER.info("[CubicChunks] biomes y {}..{}: {}", bottomY, topY, top);
         }
     }
 

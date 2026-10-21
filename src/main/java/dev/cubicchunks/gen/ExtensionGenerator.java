@@ -379,6 +379,16 @@ public final class ExtensionGenerator {
      * Biomes are sampled at the cube's real (deep) Y position. While sampling, the climate-sampler
      * remap is active so deep coordinates resolve to vanilla cave biomes (deterministic per seed).
      */
+    /** The climate sampler this dimension generates with; diagnostics only. */
+    public Climate.Sampler samplerForDiagnostics() {
+        return this.randomState != null ? this.randomState.sampler() : null;
+    }
+
+    /** The biome source this dimension actually uses; diagnostics only. */
+    public BiomeSource biomeSourceForDiagnostics() {
+        return this.generator.getBiomeSource();
+    }
+
     private void fillBiomes(int cubeMinY, ChunkPos chunkPos, PalettedContainer<Holder<Biome>> biomes) {
         BiomeSource source = generator.getBiomeSource();
         Climate.Sampler sampler = randomState != null ? randomState.sampler() : null;
@@ -389,6 +399,7 @@ public final class ExtensionGenerator {
         WorldGenState.REMAP_DEEP_BIOMES.set(remap);
         WorldGenState.REMAP_BAND_MIN_Y.set(bandMinY());
         WorldGenState.REMAP_WORLD_MIN_Y.set(level.getMinY());
+        WorldGenState.REMAP_BAND_HEIGHT.set(bandMaxY() - bandMinY());
         try {
             for (int qx = 0; qx < 4; qx++) {
                 for (int qz = 0; qz < 4; qz++) {

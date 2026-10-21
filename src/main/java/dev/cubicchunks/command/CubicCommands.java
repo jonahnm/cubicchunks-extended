@@ -33,6 +33,8 @@ public final class CubicCommands {
                                 .executes(ctx -> verify(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "y")))))
                 .then(Commands.literal("bounds")
                         .executes(ctx -> bounds(ctx.getSource())))
+                .then(Commands.literal("biomescan")
+                        .executes(ctx -> biomescan(ctx.getSource())))
                 .then(Commands.literal("bench")
                         .then(Commands.argument("radius", IntegerArgumentType.integer(0, 8))
                                 .then(Commands.argument("toY", IntegerArgumentType.integer(-8388592, 320))
@@ -76,6 +78,24 @@ public final class CubicCommands {
      * could have produced are replaced.
      */
     /** Debug: measure what a straight descent costs at increasing depth (see the log). */
+    private static int biomescan(CommandSourceStack source) {
+        ServerLevel level = source.getLevel();
+        dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);
+        if (manager == null) {
+            source.sendFailure(Component.literal("Dimension " + level.dimension().identifier()
+                    + " is not cubic-enabled."));
+            return 0;
+        }
+        var center = source.getPlayer() != null
+                ? source.getPlayer().chunkPosition()
+                : net.minecraft.world.level.ChunkPos.containing(level.getRespawnData().pos());
+        source.sendSuccess(() -> Component.literal("[CubicChunks] biome field scan: 8 chunks out, band"
+                + " heights only - see the server log."), false);
+        manager.debugScanBiomeField(center, 24, new int[]{-64, -40, -20, -4, 8, 40, 96, 192});
+        source.sendSuccess(() -> Component.literal("[CubicChunks] scan finished."), false);
+        return 1;
+    }
+
     private static int bench(CommandSourceStack source, int radius, int toY) {
         ServerLevel level = source.getLevel();
         dev.cubicchunks.core.ExtensionCubeManager manager = CubicChunks.managerFor(level);
