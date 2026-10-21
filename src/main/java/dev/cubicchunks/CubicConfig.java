@@ -35,6 +35,7 @@ public final class CubicConfig {
     public static final ModConfigSpec.BooleanValue TILE_VOLUME_FEATURES;
     public static final ModConfigSpec.BooleanValue TRANSPLANT_STRUCTURES;
     public static final ModConfigSpec.DoubleValue DEEP_CAVE_VARIATION;
+    public static final ModConfigSpec.BooleanValue ORES_AT_ALL_DEPTHS;
     public static final ModConfigSpec.BooleanValue DEEP_STRUCTURES;
 
     public static final ModConfigSpec.IntValue DEBUG_PREGEN_SECTIONS;
@@ -132,6 +133,12 @@ public final class CubicConfig {
                 "This adds an aperiodic modulation so some regions and depths are cavernous and",
                 "others dense. 0 restores the uniform behaviour.");
         DEEP_CAVE_VARIATION = b.defineInRange("deepCaveVariation", 0.0, 0.0, 0.4);
+        b.comment("Below the band, offer every ore feature that any biome of this dimension can");
+        b.comment("generate to all cubes, instead of only to cubes standing in the biome that lists");
+        b.comment("it. Without this, a mod that gates an ore behind one biome has that ore absent");
+        b.comment("at depth everywhere, because deep biome choice is a separate selection from the");
+        b.comment("surface's. Surfaces are unaffected: this only runs below the band.");
+        ORES_AT_ALL_DEPTHS = b.define("oresAtAllDepths", true);
         b.comment("Generate vanilla structures (ancient cities, villages, ...) in every stratum",
                 "below the vanilla band: each structure's pieces are translated down per stratum,",
                 "with vanilla terrain adaptation (beard) applied by the noise generator.");

@@ -593,7 +593,7 @@ public final class ExtensionCubeManager {
     }
 
     private static boolean hasHeightmapPlacement(PlacedFeature placed) {
-        for (PlacementModifier modifier : placed.placement()) {
+        for (PlacementModifier modifier : placementChain(placed)) {
             if (modifier instanceof HeightmapPlacement) {
                 return true;
             }
@@ -1680,7 +1680,7 @@ public final class ExtensionCubeManager {
                     chunkPos.getMinBlockZ() + rnd.nextInt(16));
             Stream<BlockPos> stream = Stream.of(base);
             try {
-                for (PlacementModifier modifier : placed.placement()) {
+                for (PlacementModifier modifier : placementChain(placed)) {
                     if (modifier instanceof HeightRangePlacement
                             || modifier instanceof net.minecraft.world.level.levelgen.placement.InSquarePlacement
                             || modifier instanceof net.minecraft.world.level.levelgen.placement.CountPlacement) {
@@ -1718,7 +1718,7 @@ public final class ExtensionCubeManager {
         java.util.List<BlockPos> inside = new java.util.ArrayList<>();
         WorldGenState.CURRENT_MULTIPLIER.set(multiplier);
         try {
-            for (PlacementModifier modifier : placed.placement()) {
+            for (PlacementModifier modifier : placementChain(placed)) {
                 stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
             }
             stream.forEach(pos -> {
@@ -1757,7 +1757,7 @@ public final class ExtensionCubeManager {
         java.util.ArrayList<Long> out = new java.util.ArrayList<>();
         WorldGenState.CURRENT_MULTIPLIER.set(multiplier);
         try {
-            for (PlacementModifier modifier : placed.placement()) {
+            for (PlacementModifier modifier : placementChain(placed)) {
                 stream = stream.flatMap(pos -> modifier.getPositions(context, rand, pos));
             }
             stream.forEach(pos -> {
@@ -2019,6 +2019,106 @@ public final class ExtensionCubeManager {
      * ore probability grows with depth. RNG is seeded per (column, cube, feature, tile) - unique
      * per seed, never repeating.
      */
+    /**
+     * The chain used for a feature. Normally vanilla's own. A feature borrowed from another biome's
+     * list has its {@code BiomeFilter} removed first, otherwise that filter rejects the feature at
+     * the origin - the biome there does not list it - and the feature produces no positions at all,
+     * silently. Only pooled features get an overridden chain; everything else is untouched.
+     */
+    private static final java.util.Map<PlacedFeature, List<PlacementModifier>> CHAIN_OVERRIDES =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static List<PlacementModifier> placementChain(PlacedFeature placed) {
+        List<PlacementModifier> override = CHAIN_OVERRIDES.get(placed);
+        return override != null ? override : placed.placement();
+    }
+
+    private static void overrideChainWithoutBiomeFilter(PlacedFeature placed) {
+        if (CHAIN_OVERRIDES.containsKey(placed)) {
+            return;
+        }
+        List<PlacementModifier> stripped = new java.util.ArrayList<>();
+        for (PlacementModifier modifier : placed.placement()) {
+            if (!(modifier instanceof net.minecraft.world.level.levelgen.placement.BiomeFilter)) {
+                stripped.add(modifier);
+            }
+        }
+        CHAIN_OVERRIDES.put(placed, List.copyOf(stripped));
+    }
+
+    /**
+     * Every ore-shaped feature attached to any biome this dimension can actually generate. Built once
+     * and cached. Below the band these are offered to every cube, not only to cubes whose biome
+     * lists them: a mod that gates an ore behind one biome (Mythic's gems sit in its own cave
+     * biomes) otherwise has that ore absent at depth everywhere, because depth biome choice is a
+     * different selection from the surface's. Surfaces are unchanged - this only runs below the band.
+     */
+    private java.util.List<Holder<PlacedFeature>> dimensionOrePool;
+
+    private java.util.List<Holder<PlacedFeature>> oreFeaturesInDimension() {
+        if (this.dimensionOrePool != null) {
+            return this.dimensionOrePool;
+        }
+        java.util.LinkedHashMap<String, Holder<PlacedFeature>> byId = new java.util.LinkedHashMap<>();
+        for (Holder<Biome> biomeHolder : generator.biomeSourceForDiagnostics().possibleBiomes()) {
+            for (net.minecraft.core.HolderSet<PlacedFeature> step
+                    : biomeHolder.value().getGenerationSettings().features()) {
+                for (Holder<PlacedFeature> holder : step) {
+                    if (isOrePoolFeature(holder)) {
+                        byId.putIfAbsent(featureId(holder), holder);
+                    }
+                }
+            }
+        }
+        this.dimensionOrePool = new java.util.ArrayList<>(byId.values());
+        CubicChunks.LOGGER.info("[CubicChunks] ore pool offered below the band: {} features",
+                this.dimensionOrePool.size());
+        return this.dimensionOrePool;
+    }
+
+    private static boolean isOrePoolFeature(Holder<PlacedFeature> holder) {
+        if (isVolumeFeature(holder)) {
+            return false; // geodes are volume replacements and stay where vanilla puts them
+        }
+        String type = featureTypeId(holder);
+        if (type.contains("ore") || type.contains("deposit")) {
+            return true;
+        }
+        // "vein" and "cluster" are also feature types for decorations - sculk_vein, dripstone_cluster -
+        // which are not ores and do not belong in an ore pool. Accept those only when the feature is
+        // itself named as an ore, which is how mods tend to write custom ore clusters.
+        String name = featureId(holder);
+        return (type.contains("vein") || type.contains("cluster")) && name.contains("ore");
+    }
+
+    /** The feature passes for a cube: its own biome's, then the dimension's ores it does not list. */
+    private java.util.List<java.util.List<Holder<PlacedFeature>>> featurePassesFor(Holder<Biome> cubeBiome) {
+        java.util.List<java.util.List<Holder<PlacedFeature>>> passes = new java.util.ArrayList<>();
+        java.util.Set<String> listed = new java.util.HashSet<>();
+        for (net.minecraft.core.HolderSet<PlacedFeature> step
+                : cubeBiome.value().getGenerationSettings().features()) {
+            java.util.List<Holder<PlacedFeature>> copy = new java.util.ArrayList<>();
+            for (Holder<PlacedFeature> holder : step) {
+                copy.add(holder);
+                listed.add(featureId(holder));
+            }
+            passes.add(copy);
+        }
+        if (CubicConfig.ORES_AT_ALL_DEPTHS.get()) {
+            java.util.List<Holder<PlacedFeature>> extra = new java.util.ArrayList<>();
+            for (Holder<PlacedFeature> holder : oreFeaturesInDimension()) {
+                if (!listed.contains(featureId(holder))) {
+                    extra.add(holder);
+                    overrideChainWithoutBiomeFilter(holder.value());
+                }
+            }
+            if (!extra.isEmpty()) {
+                passes.add(extra);
+            }
+        }
+        return passes;
+    }
+
     private void placeCubeFeatures(LevelChunk chunk, LevelChunkSection section, int sectionY, Holder<Biome> cubeBiome) {
         int cubeMinY = sectionY << 4;
         int cubeMaxY = cubeMinY + 16;
@@ -2029,9 +2129,9 @@ public final class ExtensionCubeManager {
         double bonus = CubicConfig.ORE_DEPTH_BONUS.get();
 
         useFeatureCacheFor(chunkPos, cubeBiome);
-        List<net.minecraft.core.HolderSet<PlacedFeature>> steps = cubeBiome.value().getGenerationSettings().features();
+        java.util.List<java.util.List<Holder<PlacedFeature>>> steps = featurePassesFor(cubeBiome);
         int stepIndex = 0;
-        for (net.minecraft.core.HolderSet<PlacedFeature> stepFeatures : steps) {
+        for (java.util.List<Holder<PlacedFeature>> stepFeatures : steps) {
             int innerIndex = 0;
             for (Holder<PlacedFeature> holder : stepFeatures) {
                 PlacedFeature placed = holder.value();
@@ -2254,7 +2354,7 @@ public final class ExtensionCubeManager {
         boolean everyLayer = false;
         WorldGenState.CURRENT_MULTIPLIER.set(32.0);
         try {
-            for (PlacementModifier modifier : placed.placement()) {
+            for (PlacementModifier modifier : placementChain(placed)) {
                 if (modifier instanceof net.minecraft.world.level.levelgen.placement.CountOnEveryLayerPlacement) {
                     // This one iterates the build range itself; its reach is the whole band.
                     everyLayer = true;
@@ -2338,7 +2438,7 @@ public final class ExtensionCubeManager {
      */
     private static boolean isStratumEligible(PlacedFeature placed) {
         boolean anchored = false;
-        for (PlacementModifier modifier : placed.placement()) {
+        for (PlacementModifier modifier : placementChain(placed)) {
             if (modifier instanceof HeightmapPlacement) {
                 return false;
             }
