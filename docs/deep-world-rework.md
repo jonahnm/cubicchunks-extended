@@ -135,3 +135,39 @@ placement work at all.
 - No blocking chunk loads inside chunk generation (that produced a 60-second tick and
   a watchdog kill); the tick-loop source loading from 0.2.14 is the pattern.
 - The light engine must not be told about sections it has no storage for.
+
+## The deeper reason structures cannot simply "run below -64" (found while scoping)
+
+Vanilla has no notion of a structure at depth. A structure start's height comes from its
+own provider - `Structure.findGenerationPoint(...)` resolving a
+`HeightProvider` against the height accessor - and those providers are written for a
+world whose floor is y=-64: bottom-relative means "just above -64", not "somewhere in
+four thousand blocks". `applyBiomeDecoration` then places the starts vanilla already
+decided on, at the heights vanilla chose.
+
+This is why copying was the only thing that worked: below the band there are no vanilla
+decisions to reproduce, only decisions to invent or translate. And it reframes the
+rework: the unlock for structure variety is not a different pass, it is the *height
+range vanilla generation is given*. A CubicChunks-style world works because
+`above_bottom` means the bottom of an extended world, so bottom-relative structures
+distribute over the whole depth without anyone copying anything.
+
+Consequence for design B: commit 3 (depth-aware starts) is the load-bearing one, and it
+is a settings/data change rather than a code path. The pass, the view and the
+scheduler only matter once there is something to place.
+
+Consequence for the vanilla band: any change to the height range vanilla sees moves
+band-terrain anchors too, which is the one thing that must not regress. So the
+experiment to run first is narrow: give the generator a taller world *for structure
+start heights only* (a height accessor used by start providers that reports the
+configured range), and check two things on a pinned seed - do structures appear at
+depth, and is the band identical. If the band moves, the approach needs the start
+providers offset per stratum instead, which is closer to what the transplant does.
+
+Recommended next session, in order:
+1. Spike: minimal `ChunkAccess` surface needed by `applyBiomeDecoration` (subclass
+   `EmptyLevelChunk`, present a single section). Timebox it; if the surface is large,
+   stop and reconsider, because 2 below may make it unnecessary.
+2. Height-range experiment above, measured on a pinned seed with `/cubicchunks bench`
+   and the per-stratum census.
+3. Only then the deferred decoration scheduler.
