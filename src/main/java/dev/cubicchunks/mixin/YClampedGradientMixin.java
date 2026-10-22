@@ -37,24 +37,26 @@ public abstract class YClampedGradientMixin {
 
         boolean terrainGradient = this.fromY == -64 && this.toY == 320;
         if (terrainGradient && y < -64) {
-            // depth gradient (1.5 -> -1.5) would clamp the deep world to "densest possible";
-            // rebaseline to 0.8 (and similar for the 8.0 -> -40.0 spaghetti thickness gradient)
-            double target;
-            if (this.fromValue == 1.5 && this.toValue == -1.5) {
-                target = 0.8;
-            } else if (this.fromValue == 8.0 && this.toValue == -40.0) {
-                target = 4.0;
-            } else {
-                target = this.fromValue;
+            // Vanilla clamps both of these below -64, which is what makes everything under the band
+            // dead solid. Rather than replacing the gradient with a constant, carry it down to the
+            // value vanilla itself reaches at the bottom of its world: near the band the value that
+            // matches the band's own cave density, then descending smoothly to that floor value at
+            // the configured floor. Caves thin out with depth the way vanilla's do towards y=-64,
+            // nothing repeats, and no new formula is introduced - only where the existing gradient
+            // starts and ends.
+            boolean mainDensity = this.fromValue == 1.5 && this.toValue == -1.5;
+            boolean spaghetti = this.fromValue == 8.0 && this.toValue == -40.0;
+            if (!mainDensity && !spaghetti) {
+                return this.fromValue;
             }
+            double near = mainDensity ? 0.8 : 4.0;
+            double atFloor = mainDensity ? 1.5 : 8.0;
             if (y >= -128) {
-                double t = (y - -128) / 64.0;
-                return Mth.lerp(t, target, this.fromValue);
+                double t = (y + 128) / 64.0;
+                return Mth.lerp(t, near, this.fromValue);
             }
-            if (this.fromValue == 1.5 && this.toValue == -1.5) {
-                return deepBaseline(target, context, y);
-            }
-            return target;
+            double graded = descend(y, near, atFloor, minY);
+            return mainDensity ? deepBaseline(graded, context, y) : graded;
         }
 
         double val = y;
@@ -94,6 +96,19 @@ public abstract class YClampedGradientMixin {
      * fits within any depth anyone will actually generate. The modulation fades in below the seam, so
      * the band's own caves - and the match between y=-64 and the first stratum - are untouched.
      */
+    /** Linear descent from the seam value to the value vanilla uses at the bottom of its world. */
+    @org.spongepowered.asm.mixin.Unique
+    private static double descend(int y, double nearValue, double floorValue, int minY) {
+        if (y >= -128) {
+            return nearValue;
+        }
+        if (minY >= -128) {
+            return floorValue;
+        }
+        double t = Math.min(1.0, (-128.0 - y) / (-128.0 - minY));
+        return Mth.lerp(t, nearValue, floorValue);
+    }
+
     @org.spongepowered.asm.mixin.Unique
     private double deepBaseline(double target, DensityFunction.FunctionContext context, int y) {
         double amplitude = CubicConfig.DEEP_CAVE_VARIATION.get();
