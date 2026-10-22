@@ -871,6 +871,18 @@ public final class ExtensionCubeManager {
                 boundSamples == 0L ? 0L
                         : DeepStructures.STRUCTURE_CUBE_AIR.get() * 1000L / (4096L * boundSamples));
 
+        if (!DeepStructures.INDEXED_BY_STRUCTURE.isEmpty()) {
+            java.util.List<String> indexed = new java.util.ArrayList<>(DeepStructures.INDEXED_BY_STRUCTURE.keySet());
+            indexed.sort((a, b) -> Long.compare(
+                    DeepStructures.INDEXED_BY_STRUCTURE.get(b).longValue(),
+                    DeepStructures.INDEXED_BY_STRUCTURE.get(a).longValue()));
+            StringBuilder line = new StringBuilder();
+            for (String name : indexed.subList(0, Math.min(12, indexed.size()))) {
+                line.append(' ').append(name).append('=')
+                        .append(DeepStructures.INDEXED_BY_STRUCTURE.get(name).longValue());
+            }
+            CubicChunks.LOGGER.info("[CubicChunks]   pieces offered from the column index, by structure:{}", line);
+        }
         if (!DeepStructures.TRANSPLANTED_BY_STRUCTURE.isEmpty()) {
             java.util.List<String> names = new java.util.ArrayList<>(
                     DeepStructures.TRANSPLANTED_BY_STRUCTURE.keySet());
@@ -1597,6 +1609,10 @@ public final class ExtensionCubeManager {
                     if (start == null || !start.isValid()) {
                         continue;
                     }
+                    String indexedName = DeepStructures.structureKey(start, level.registryAccess());
+                    DeepStructures.INDEXED_BY_STRUCTURE
+                            .computeIfAbsent(indexedName, k -> new java.util.concurrent.atomic.AtomicLong())
+                            .addAndGet(start.getPieces().size());
                     net.minecraft.world.level.levelgen.structure.TerrainAdjustment adaptation = start.getStructure().terrainAdaptation();
                     for (StructurePiece piece : start.getPieces()) {
                         this.pieceAdaptations.put(piece, adaptation);

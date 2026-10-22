@@ -101,6 +101,11 @@ public final class DeepStructures {
      * in its own right instead of being hidden inside "the feature works". */
     private static final java.util.Set<String> UNRECOGNISED_PIECE_TYPES =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Pieces offered to cubes from the per-column index, grouped by structure name. This is the
+     * answer to "which structures actually reach the deep world", as opposed to which ones exist. */
+    public static final java.util.concurrent.ConcurrentHashMap<String,
+            java.util.concurrent.atomic.AtomicLong> INDEXED_BY_STRUCTURE =
+            new java.util.concurrent.ConcurrentHashMap<>();
     public static final java.util.concurrent.ConcurrentHashMap<String,
             java.util.concurrent.atomic.AtomicLong> TRANSPLANTED_BY_STRUCTURE =
             new java.util.concurrent.ConcurrentHashMap<>();
