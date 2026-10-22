@@ -468,6 +468,7 @@ public final class ExtensionCubeManager {
         debugColumnSaveBreakdown(spawn);
         debugReportBiomeProfile(columns);
         debugReportStructures(columns);
+        debugStructurePicks(columns, 8);
         debugReportFeatureStats();
         debugReportCubeComposition(spawn);
         this.profileCost = false;
@@ -2329,6 +2330,46 @@ public final class ExtensionCubeManager {
             }
         }
         return passes;
+    }
+
+    /**
+     * What vanilla's own placement decision would choose for each stratum, asked on the column that
+     * stratum maps to. Read-only: nothing is placed. This predicts whether generating structures per
+     * stratum (option 2 in the rework note) would deliver variety, before any of that is built.
+     */
+    public void debugStructurePicks(java.util.Collection<ChunkPos> columns, int strata) {
+        var state = DeepStructures.SHARED_STRUCTURE_STATE;
+        if (state == null) {
+            CubicChunks.LOGGER.info("[CubicChunks]   strata picks: structure state not captured yet");
+            return;
+        }
+        java.util.Map<String, Long> picks = new java.util.TreeMap<>();
+        long asks = 0L;
+        long seed = level.getSeed();
+        for (ChunkPos column : columns) {
+            for (int stratum = 1; stratum <= strata; stratum++) {
+                ChunkPos shifted = DeepStructures.sourceColumnFor(column, stratum, seed);
+                for (var setHolder : state.possibleStructureSets()) {
+                    var set = setHolder.value();
+                    asks++;
+                    if (!set.placement().isStructureChunk(state, shifted.x(), shifted.z())) {
+                        continue;
+                    }
+                    for (var entry : set.structures()) {
+                        String name = entry.structure().unwrapKey()
+                                .map(k -> k.identifier().toString()).orElse("[unregistered]");
+                        picks.merge(name, 1L, Long::sum);
+                    }
+                }
+            }
+        }
+        StringBuilder line = new StringBuilder();
+        picks.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                .limit(14)
+                .forEach(e -> line.append(' ').append(e.getKey()).append('=').append(e.getValue()));
+        CubicChunks.LOGGER.info("[CubicChunks]   strata picks over {} columns x {} strata ({} decisions):{}",
+                columns.size(), strata, asks, line);
     }
 
     private void placeCubeFeatures(LevelChunk chunk, LevelChunkSection section, int sectionY, Holder<Biome> cubeBiome) {

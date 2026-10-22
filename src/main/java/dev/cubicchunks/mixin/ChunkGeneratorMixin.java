@@ -29,6 +29,7 @@ public abstract class ChunkGeneratorMixin {
             StructureTemplateManager templateManager,
             net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> levelKey,
             CallbackInfo ci) {
+        dev.cubicchunks.core.DeepStructures.SHARED_STRUCTURE_STATE = structureState;
         if (!CubicConfig.DEEP_STRUCTURES.get() || CubicConfig.extensionMinY() == null) {
             return;
         }

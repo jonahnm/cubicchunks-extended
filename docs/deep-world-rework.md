@@ -210,3 +210,41 @@ What can put structures at depth, in ascending order of departure from vanilla:
 Recommended next step if structure variety matters: option 2, implemented as a config
 flag, measured with `/cubicchunks bench` (which already names every structure reaching the
 deep world and counts pieces placed) against option 1 on a pinned seed.
+
+## Option 2 measured before building it: it does not deliver variety either
+
+A probe was added that asks vanilla's own placement decision (`StructurePlacement
+.isStructureChunk`) for every sampled column x every stratum, on the column that stratum
+maps to. Read-only, no placement. Result over 49 columns x 8 strata, 53,704 decisions:
+
+    terralith:underground/frosted_dungeon=5  minecraft:mineshaft=2
+    minecraft:mineshaft_mesa=2               minecraft:ruined_portal=2
+    minecraft:ruined_portal_desert=2         minecraft:ruined_portal_jungle=2
+    minecraft:ruined_portal_mountain=2       minecraft:ruined_portal_nether=2
+    ...
+
+Ten picks across roughly four hundred column-strata, and no ancient city, trial chamber
+or stronghold among them.
+
+The reason is structural. `isStructureChunk` is purely horizontal and each structure's
+spacing and origin are tuned to fill a 384-block world; the set of columns that satisfy it
+is fixed by the seed. Asking about eight small shifts of the same column lands in the same
+few cells of that grid. And the structures that do get picked are the ones whose placement
+is dense - mineshafts, ruined portals - which is exactly what the deep world already
+shows.
+
+So option 2, as "run vanilla's generation with the start Y offset into each stratum", buys
+nothing: it would generate *the same structures in the same columns*, merely assembled by
+vanilla instead of copied. The variety problem is not in the assembly.
+
+What variety at depth would actually require: **new start positions**, i.e. per-stratum
+placement with its own spacing, separation and salt - a genuinely different sample of the
+structure grid per stratum rather than a shift of the same one. That is a departure from
+vanilla (vanilla never places these structures at depth at all), it is a design decision
+for the user rather than a fidelity improvement, and it is the only remaining route that
+is not copying.
+
+Recommendation: if the user wants this, implement per-stratum random-spread placement with
+a stratum-dependent salt, generating the structure with its start position set inside that
+stratum, and measure with the same probe plus the pieces-placed count. If they do not, the
+current copying behaviour is the faithful option and the note should stop proposing reworks.

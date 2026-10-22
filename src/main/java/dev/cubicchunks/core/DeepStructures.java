@@ -119,6 +119,9 @@ public final class DeepStructures {
      * generation from the level looked up neighbours and deadlocked the worldgen mailbox.
      */
     public static volatile StructurePieceSerializationContext SHARED_CONTEXT;
+    /** The generator's structure state, kept from the generation hook so diagnostics can ask
+     * vanilla's own placement decisions without rebuilding them. */
+    public static volatile net.minecraft.world.level.chunk.ChunkGeneratorStructureState SHARED_STRUCTURE_STATE;
 
     public static void createDeepStarts(RegistryAccessHolder holder, StructureManager structureManager, ChunkAccess chunk) {
         // NOTE: holder.context() must be constructed with the SERVER's registry/template manager.
