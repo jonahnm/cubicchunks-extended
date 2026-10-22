@@ -71,12 +71,49 @@ first:
 feature pass per cube (B) while structures continue to come from band starts (today's
 behaviour). Smaller change; does not fix structure variety.
 
+## Blocker found while starting commit 1 (decisive, changes the shape of B)
+
+`ChunkGenerator.applyBiomeDecoration` is not self-contained. Reading it in the 26.2
+sources:
+
+- line 334-340: it walks a 3x3 neighbourhood and calls
+  `level.getChunk(chunkPos.x(), chunkPos.z())` for each of the nine columns. That is a
+  **blocking chunk load inside decoration**. Calling this from this mod's cube
+  generation path is precisely the pattern that produced a 60-second tick and a
+  watchdog kill earlier in the project, so it cannot be called inline there.
+- line 350-360: it also places **structures** - `structureManager.startsForStructure(
+  sectionPos, structure).forEach(start -> start.placeInChunk(...))` - inside the same
+  pass, per generation step. So vanilla's structure placement is not a separate call
+  to make at depth; it happens inside decoration, against the writable chunk.
+
+What this means for design B: the per-cube pass cannot simply be invoked while a cube
+is being generated. It has to be *scheduled* the way vanilla schedules it - wait until
+the column's neighbourhood is loaded, then decorate - which means cubes need a
+"decorated" state, much like vanilla's chunk status pipeline has a DECORATE stage
+that waits on neighbours. Concretely:
+
+- a cube is generated (terrain) as today;
+- it is queued for decoration, keyed by column;
+- the tick loop decorates cubes whose 3x3 neighbourhood is fully loaded, using the
+  tick-loop loading pattern that already works (0.2.14) rather than requesting a chunk
+  from inside generation;
+- a cube saved before decoration is decorated on next load, tracked per section.
+
+That is a bigger change than "add a chunk view", and it is the honest price of using
+vanilla's pass instead of emulating it. It also inherits vanilla's behaviour of
+placing structures during decoration, which is what makes depth-aware structure
+placement work at all.
+
 ## Ordered commits for B
 
-1. **Cube-sized `ChunkAccess` view** plus a config flag `vanillaFeaturePass`
-   (default off). Verify by comparing ore counts per stratum against the current
-   tiling on a pinned seed; the tiling is the reference, and the pass must not sit
-   more than a small factor away from it.
+1. **Deferred decoration.** Cubes are generated as today, then queued for
+   decoration; the tick loop decorates a cube once its column and the eight
+   neighbours are loaded, reusing the proven tick-loop loading path. Nothing calls
+   `applyBiomeDecoration` from inside generation. Ships behind `vanillaFeaturePass`
+   (default off) so the existing tiling remains the fallback.
+2. **Cube-sized `ChunkAccess` view** for the pass, plus reconciling it with the
+   `CountPlacement`-family mixins so counts are scaled once and not twice. Verify by
+   comparing ore counts per stratum against the current tiling on a pinned seed.
 2. **Retire the feature tiling and the ore pool** once (1) matches, leaving vanilla's
    placement as the only path. Delete `placeCubeFeatures`, `measureFeatureSpan`,
    `isOreStratumEligible`, `oreFeaturesInDimension` and the `CountPlacement` scaling
