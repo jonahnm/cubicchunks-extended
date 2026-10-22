@@ -171,3 +171,42 @@ Recommended next session, in order:
 2. Height-range experiment above, measured on a pinned seed with `/cubicchunks bench`
    and the per-stratum census.
 3. Only then the deferred decoration scheduler.
+
+## Correction: the height-range idea is disproven by the data
+
+The previous section proposed giving start providers an extended height accessor. Checked
+against the vanilla structure files in the 26.2 jar, that changes almost nothing, because
+vanilla has no structure written to use an extended height:
+
+- Every structure that declares `start_height` uses `"absolute"`: ancient_city,
+  trial_chambers, village_* (all six), pillager_outpost, trail_ruins, bastion_remnant.
+  Absolute means a fixed Y in the JSON - a taller world does not move them.
+- Every structure that declares no `start_height` places itself in Java, band-locally:
+  mineshaft (hardcoded `new BlockPos(chunkPos.getMiddleBlockX(), 50,
+  chunkPos.getMinBlockZ())`), stronghold, monument, ocean_ruin_*, shipwreck*,
+  ruined_portal_*, desert_pyramid, jungle_pyramid, igloo, mansion, swamp_hut,
+  buried_treasure, fortress, end_city, nether_fossil.
+
+So "let vanilla generate below -64" cannot deliver vanilla structures below -64: there is
+no vanilla structure that asks to be there. This is not a limitation of this mod's
+architecture, and no amount of per-cube vanilla pass or chunk view changes it.
+
+What can put structures at depth, in ascending order of departure from vanilla:
+
+1. **Copy band structures downward** (what this mod does). Verified working: 695 pieces
+   placed below the band on a pinned seed. Variety equals the variety of the source band
+   in that area, measured as `minecraft:mineshaft=2582558 terralith:rubble_taiga=4840`
+   and nothing else, because that is all the sampled band contained.
+2. **Run vanilla's structure code with the start Y offset into a stratum.** Vanilla's own
+   generators, pieces and template pool logic, aimed at a chosen depth: for each stratum,
+   generate the structure with its start position translated down. This keeps vanilla's
+   layout code and gives genuinely new structures per stratum instead of translated
+   copies, at the price of vanilla no longer deciding where they go. Closest to the spirit
+   of CubicChunks, which also does not get vanilla structures at depth for free.
+3. **Pacing**: multiply how often structures are drawn. Pure invention; the user should
+   pick the number.
+4. **Mods that define deep structures.** Nothing this mod needs to do.
+
+Recommended next step if structure variety matters: option 2, implemented as a config
+flag, measured with `/cubicchunks bench` (which already names every structure reaching the
+deep world and counts pieces placed) against option 1 on a pinned seed.
