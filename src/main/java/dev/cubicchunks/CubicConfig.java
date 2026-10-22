@@ -36,6 +36,7 @@ public final class CubicConfig {
     public static final ModConfigSpec.BooleanValue TRANSPLANT_STRUCTURES;
     public static final ModConfigSpec.DoubleValue DEEP_CAVE_VARIATION;
     public static final ModConfigSpec.BooleanValue ORES_AT_ALL_DEPTHS;
+    public static final ModConfigSpec.BooleanValue PROTECT_UNBEARDED_STRUCTURES;
     public static final ModConfigSpec.BooleanValue DEEP_STRUCTURES;
 
     public static final ModConfigSpec.IntValue DEBUG_PREGEN_SECTIONS;
@@ -139,6 +140,15 @@ public final class CubicConfig {
         b.comment("at depth everywhere, because deep biome choice is a separate selection from the");
         b.comment("surface's. Surfaces are unaffected: this only runs below the band.");
         ORES_AT_ALL_DEPTHS = b.define("oresAtAllDepths", true);
+        b.comment("Off by default, because measurement said no to it. Tested on one seed,"
+                + " comparing the same 40 cubes that are bound to receive a structure, option on"
+                + " against option off: void went from 24 per 1k to 38 per 1k - the beard added"
+                + " space rather than filling it.");
+        b.comment("A beard is not a filler: Beardifier.compute blends terrain height relative to a");
+        b.comment("structure's ground level (dyToGround, signed), so with a shaft deep in solid rock");
+        b.comment("the positions below its ground level taper the other way. Vanilla leaves mineshafts");
+        b.comment("unbearded for a reason. Keep this off unless you want to see what it does.");
+        PROTECT_UNBEARDED_STRUCTURES = b.define("protectUnbeardedStructures", false);
         b.comment("Generate vanilla structures (ancient cities, villages, ...) in every stratum",
                 "below the vanilla band: each structure's pieces are translated down per stratum,",
                 "with vanilla terrain adaptation (beard) applied by the noise generator.");

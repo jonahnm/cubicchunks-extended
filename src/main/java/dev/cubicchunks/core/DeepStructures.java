@@ -63,10 +63,25 @@ public final class DeepStructures {
             new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong BEARD_ADAPTATION_NONE =
             new java.util.concurrent.atomic.AtomicLong();
+    /** Pieces whose structure asked for no beard, given a mild one in the extension. */
+    public static final java.util.concurrent.atomic.AtomicLong BEARD_ADAPTATION_ADDED =
+            new java.util.concurrent.atomic.AtomicLong();
     /** Air counted in a handful of bearded cubes, to compare against the stratum average. */
     public static final java.util.concurrent.atomic.AtomicLong BEARD_SAMPLE_COUNT =
             new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong BEARD_SAMPLE_AIR =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Control: cubes in columns that do hold a structure, in a cube that does not. Same seed, same
+     * column, same neighbourhood - the only difference is whether this cube's terrain was raised. */
+    /** Cubes that are about to receive a structure, sampled whether or not a beard was applied -
+     * the same set of cubes in both configurations, on the same seed. */
+    public static final java.util.concurrent.atomic.AtomicLong STRUCTURE_CUBE_SAMPLES =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong STRUCTURE_CUBE_AIR =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong CONTROL_SAMPLE_COUNT =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong CONTROL_SAMPLE_AIR =
             new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong TRANSPLANT_SOURCES_UNLOADED =
             new java.util.concurrent.atomic.AtomicLong();
